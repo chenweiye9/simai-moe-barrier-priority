@@ -1,0 +1,902 @@
+diff --git a/simulation/src/applications/helper/rdma-client-helper.cc b/simulation/src/applications/helper/rdma-client-helper.cc
+index 7aa6b6f..07ecc53 100644
+--- a/simulation/src/applications/helper/rdma-client-helper.cc
++++ b/simulation/src/applications/helper/rdma-client-helper.cc
+@@ -29,7 +29,7 @@ RdmaClientHelper::RdmaClientHelper ()
+ }
+ 
+ RdmaClientHelper::RdmaClientHelper (uint16_t pg, Ipv4Address sip, Ipv4Address dip, uint16_t sport, uint16_t dport, uint64_t size, uint32_t win, uint64_t baseRtt,
+-        void (*msg_handler)(void* fun_arg), void* fun_arg, int tag, int src, int dest)
++        void (*msg_handler)(void* fun_arg), void* fun_arg, int tag, int src, int dest, uint64_t group_id)
+ {
+ 	m_factory.SetTypeId (RdmaClient::GetTypeId ());
+ 	SetAttribute ("PriorityGroup", UintegerValue (pg));
+@@ -41,6 +41,7 @@ RdmaClientHelper::RdmaClientHelper (uint16_t pg, Ipv4Address sip, Ipv4Address di
+ 	SetAttribute ("Window", UintegerValue (win));
+ 	SetAttribute ("BaseRtt", UintegerValue (baseRtt));
+   SetAttribute ("Tag", UintegerValue (tag));
++  SetAttribute ("GroupId", UintegerValue (group_id));
+   SetAttribute ("Src", UintegerValue (src));
+   SetAttribute ("Dest", UintegerValue (dest));
+   SetAttribute ("NVLS_enable", UintegerValue (0));
+diff --git a/simulation/src/applications/helper/rdma-client-helper.h b/simulation/src/applications/helper/rdma-client-helper.h
+index 605cd03..5de988a 100644
+--- a/simulation/src/applications/helper/rdma-client-helper.h
++++ b/simulation/src/applications/helper/rdma-client-helper.h
+@@ -52,7 +52,7 @@ public:
+    */
+ 
+   RdmaClientHelper (uint16_t pg, Ipv4Address sip, Ipv4Address dip, uint16_t sport, uint16_t dport, uint64_t size, uint32_t win, uint64_t baseRtt,
+-  void (*msg_handler)(void* fun_arg), void* fun_arg,int tag, int src, int dest);
++  void (*msg_handler)(void* fun_arg), void* fun_arg,int tag, int src, int dest, uint64_t group_id);
+ 
+   /**
+    * Record an attribute to be set in each Application after it is is created.
+diff --git a/simulation/src/applications/model/rdma-client.cc b/simulation/src/applications/model/rdma-client.cc
+index 0f40114..886b5d8 100644
+--- a/simulation/src/applications/model/rdma-client.cc
++++ b/simulation/src/applications/model/rdma-client.cc
+@@ -35,6 +35,7 @@
+ #include "ns3/uinteger.h"
+ #include <ns3/rdma-driver.h>
+ #include <stdio.h>
++#include <limits>
+ #include <stdlib.h>
+ 
+ namespace ns3 {
+@@ -77,6 +78,10 @@ TypeId RdmaClient::GetTypeId(void) {
+           .AddAttribute("Tag", "Tag", UintegerValue(0),
+                         MakeUintegerAccessor(&RdmaClient::tag),
+                         MakeUintegerChecker<uint64_t>())
++          .AddAttribute("GroupId", "Logical flow group id",
++                        UintegerValue(std::numeric_limits<uint64_t>::max()),
++                        MakeUintegerAccessor(&RdmaClient::group_id),
++                        MakeUintegerChecker<uint64_t>())
+           .AddAttribute("Src", "Src", UintegerValue(0),
+                         MakeUintegerAccessor(&RdmaClient::src),
+                         MakeUintegerChecker<uint64_t>())
+@@ -131,7 +136,7 @@ void RdmaClient::StartApplication(void) {
+   // setup NVLS
+   if(nvls_enable) rdma->EnbaleNVLS();
+   else rdma->DisableNVLS();
+-  rdma->AddQueuePair(src, dest, tag, m_size, m_pg, m_sip, m_dip, m_sport,
++  rdma->AddQueuePair(src, dest, tag, group_id, m_size, m_pg, m_sip, m_dip, m_sport,
+                      m_dport, m_win, m_baseRtt,
+                      MakeCallback(&RdmaClient::Finish, this),
+                      MakeCallback(&RdmaClient::Sent, this));
+diff --git a/simulation/src/applications/model/rdma-client.h b/simulation/src/applications/model/rdma-client.h
+index ed161f1..f258125 100644
+--- a/simulation/src/applications/model/rdma-client.h
++++ b/simulation/src/applications/model/rdma-client.h
+@@ -81,6 +81,7 @@ private:
+   void (*msg_handler)(void* fun_arg);
+   void* fun_arg;
+   uint64_t tag; 
++  uint64_t group_id;
+   uint64_t src; 
+   uint64_t dest; 
+   uint32_t nvls_enable;
+diff --git a/simulation/src/network/utils/bit-deserializer.h b/simulation/src/network/utils/bit-deserializer.h
+index bed6399..6320fe7 100644
+--- a/simulation/src/network/utils/bit-deserializer.h
++++ b/simulation/src/network/utils/bit-deserializer.h
+@@ -1,91 +1,92 @@
+-/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
+-/*
+- * Copyright (c) 2020 Universita' di Firenze, Italy
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License version 2 as
+- * published by the Free Software Foundation;
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+- *
+- * Author: Tommaso Pecorella <tommaso.pecorella@unifi.it>
+- */
+-
+-#ifndef BITDESERIALIZER_H_
+-#define BITDESERIALIZER_H_
+-
+-#include <vector>
++/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
++/*
++ * Copyright (c) 2020 Universita' di Firenze, Italy
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation;
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ *
++ * Author: Tommaso Pecorella <tommaso.pecorella@unifi.it>
++ */
++
++#ifndef BITDESERIALIZER_H_
++#define BITDESERIALIZER_H_
++
++#include <cstdint>
+ #include <deque>
+-
+-namespace ns3 {
+-
+-/**
+- * \ingroup packet
+- *
+- * \brief Bit deserializer. See also \sa ns3::BitSerializer
+- *
+- * This class helps converting a variable number, variable sized
+- * number of bit-boundary fields stored as byte array representation
+- * and extract the original bit-fields.
+- *
+- * Note that once the Deserialization starts, it's not anymore
+- * possible to add more data to the byte blob to deserialize.
+- */
+-
+-class BitDeserializer
+-{
+-public:
+-  BitDeserializer ();
+-
+-  /**
+-   * Pushes some bytes into the blob to be deserialized.
+-   * \param bytes The bytes to add.
+-   */
+-  void PushBytes (std::vector<uint8_t> bytes);
+-
+-  /**
+-   * Pushes some bytes into the blob to be deserialized.
+-   * \param bytes The bytes to add.
+-   * \param size The length of the array.
+-   */
+-  void PushBytes (uint8_t* bytes, uint32_t size);
+-
+-  /**
+-   * Pushes one byte into the blob to be deserialized.
+-   * \param byte The byte to add.
+-   */
+-  void PushByte (uint8_t byte);
+-
+-  /**
+-   * Pops a given number of bits from the blob front. In other terms,
+-   * 'size' bits are shifted from the contents of the byte blob
+-   * onto the return value.
+-   *
+-   * The maximum number of bits to be deserialized in one single call is 64.
+-   *
+-   * \param size The number of bits to pop.
+-   * \return The popped bits value
+-   */
+-  uint64_t GetBits (uint8_t size);
+-
+-private:
+-  /**
+-   * Prepare the byte array to the deserialization.
+-   */
+-  void PrepareDeserialization ();
+-
+-  std::deque<bool> m_blob; //!< Blob of bits ready to be deserialized.
+-  std::vector<uint8_t> m_bytesBlob;  //!< Blob of bytes to be deserialized.
+-  bool m_deserializing; //!< True if the deserialization did start already.
+-};
+-
+-} // namespace ns3
+-
+-#endif /* BITDESERIALIZER_H_ */
++#include <vector>
++
++namespace ns3 {
++
++/**
++ * \ingroup packet
++ *
++ * \brief Bit deserializer. See also \sa ns3::BitSerializer
++ *
++ * This class helps converting a variable number, variable sized
++ * number of bit-boundary fields stored as byte array representation
++ * and extract the original bit-fields.
++ *
++ * Note that once the Deserialization starts, it's not anymore
++ * possible to add more data to the byte blob to deserialize.
++ */
++
++class BitDeserializer
++{
++public:
++  BitDeserializer ();
++
++  /**
++   * Pushes some bytes into the blob to be deserialized.
++   * \param bytes The bytes to add.
++   */
++  void PushBytes (std::vector<uint8_t> bytes);
++
++  /**
++   * Pushes some bytes into the blob to be deserialized.
++   * \param bytes The bytes to add.
++   * \param size The length of the array.
++   */
++  void PushBytes (uint8_t* bytes, uint32_t size);
++
++  /**
++   * Pushes one byte into the blob to be deserialized.
++   * \param byte The byte to add.
++   */
++  void PushByte (uint8_t byte);
++
++  /**
++   * Pops a given number of bits from the blob front. In other terms,
++   * 'size' bits are shifted from the contents of the byte blob
++   * onto the return value.
++   *
++   * The maximum number of bits to be deserialized in one single call is 64.
++   *
++   * \param size The number of bits to pop.
++   * \return The popped bits value
++   */
++  uint64_t GetBits (uint8_t size);
++
++private:
++  /**
++   * Prepare the byte array to the deserialization.
++   */
++  void PrepareDeserialization ();
++
++  std::deque<bool> m_blob; //!< Blob of bits ready to be deserialized.
++  std::vector<uint8_t> m_bytesBlob;  //!< Blob of bytes to be deserialized.
++  bool m_deserializing; //!< True if the deserialization did start already.
++};
++
++} // namespace ns3
++
++#endif /* BITDESERIALIZER_H_ */
+diff --git a/simulation/src/network/utils/bit-serializer.h b/simulation/src/network/utils/bit-serializer.h
+index acaf1fe..8c36dc4 100644
+--- a/simulation/src/network/utils/bit-serializer.h
++++ b/simulation/src/network/utils/bit-serializer.h
+@@ -1,117 +1,118 @@
+-/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
+-/*
+- * Copyright (c) 2020 Universita' di Firenze, Italy
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License version 2 as
+- * published by the Free Software Foundation;
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+- *
+- * Author: Tommaso Pecorella <tommaso.pecorella@unifi.it>
+- */
+-
+-#ifndef BITSERIALIZER_H_
+-#define BITSERIALIZER_H_
+-
++/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
++/*
++ * Copyright (c) 2020 Universita' di Firenze, Italy
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation;
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ *
++ * Author: Tommaso Pecorella <tommaso.pecorella@unifi.it>
++ */
++
++#ifndef BITSERIALIZER_H_
++#define BITSERIALIZER_H_
++
++#include <cstdint>
+ #include <vector>
+-
+-namespace ns3 {
+-
+-/**
+- * \ingroup packet
+- *
+- * \brief Bit serializer. See also \sa ns3::BitDeserializer
+- *
+- * This class helps converting a variable number, variable sized
+- * number of bit-boundary fields to its final byte array representation.
+- *
+- * The typical use-case is:
+- * \verbatim
+-   aaa: A field
+-   bbb: B field
+-   ccc: C field
+-   ddd: D field
+-   000: padding
+-
+-   |aaaa abbb bbcc cdd0|
+- \endverbatim
+- *
+- *
+- * Padding can be automatically added at the end or at the start
+- * of the byte blob to reach a multiple of 8 bits.
+- * By default the padding is added at the end of the byte blob.
+- *
+- * This class should be used in two cases:
+- *   - When the number of fields is large.
+- *   - When the number of fields is variable.
+- * In the other cases it's more convenient to use a simple bitmask.
+- */
+-
+-class BitSerializer
+-{
+-public:
+-  BitSerializer ();
+-
+-  /**
+-   * Toggles the padding insertion policy.
+-   * \param padAtEnd true if the padding have to be inserted at the end of the bit blob.
+-   */
+-  void InsertPaddingAtEnd (bool padAtEnd);
+-
+-  /**
+-   * Pushes a number of bits in the blob.
+-   * \param value the bits to be inserted.
+-   * \param significantBits Number of bits to insert.
+-   */
+-  void PushBits (uint64_t value, uint8_t significantBits);
+-
+-  /**
+-   * Get the bytes representation of the blob.
+-   * Note that this operation  \b automatically add the
+-   * needed padding at the end (or start) of the blob.
+-   *
+-   * \warning {This operation clears the stored data.}
+-   *
+-   * \returns The byte representation of the blob.
+-   */
+-  std::vector<uint8_t> GetBytes ();
+-
+-  /**
+-   * Get the bytes representation of the blob.
+-   * Note that this operation  \b automatically add the
+-   * needed padding at the end (or start) of the blob.
+-   *
+-   * \warning {This operation clears the stored data.}
+-   *
+-   * \param [out] buffer The buffer where to store the return data.
+-   * \param [in] size The size of the buffer.
+-   * \returns The number of bytes actually used in the buffer.
+-   */
+-  uint8_t GetBytes (uint8_t *buffer, uint32_t size);
+-
+-private:
+-  /**
+-   * Add the padding at the start of the blob.
+-   */
+-  void PadAtStart ();
+-
+-  /**
+-   * Add the padding at the end of the blob.
+-   */
+-  void PadAtEnd ();
+-
+-  std::vector<bool> m_blob; //!< Blob of serialized bits.
+-  bool m_padAtEnd; //!< True if the padding must be added at the end of the blob.
+-};
+-
+-} // namespace ns3
+-
+-#endif /* BITSERIALIZER_H_ */
++
++namespace ns3 {
++
++/**
++ * \ingroup packet
++ *
++ * \brief Bit serializer. See also \sa ns3::BitDeserializer
++ *
++ * This class helps converting a variable number, variable sized
++ * number of bit-boundary fields to its final byte array representation.
++ *
++ * The typical use-case is:
++ * \verbatim
++   aaa: A field
++   bbb: B field
++   ccc: C field
++   ddd: D field
++   000: padding
++
++   |aaaa abbb bbcc cdd0|
++ \endverbatim
++ *
++ *
++ * Padding can be automatically added at the end or at the start
++ * of the byte blob to reach a multiple of 8 bits.
++ * By default the padding is added at the end of the byte blob.
++ *
++ * This class should be used in two cases:
++ *   - When the number of fields is large.
++ *   - When the number of fields is variable.
++ * In the other cases it's more convenient to use a simple bitmask.
++ */
++
++class BitSerializer
++{
++public:
++  BitSerializer ();
++
++  /**
++   * Toggles the padding insertion policy.
++   * \param padAtEnd true if the padding have to be inserted at the end of the bit blob.
++   */
++  void InsertPaddingAtEnd (bool padAtEnd);
++
++  /**
++   * Pushes a number of bits in the blob.
++   * \param value the bits to be inserted.
++   * \param significantBits Number of bits to insert.
++   */
++  void PushBits (uint64_t value, uint8_t significantBits);
++
++  /**
++   * Get the bytes representation of the blob.
++   * Note that this operation  \b automatically add the
++   * needed padding at the end (or start) of the blob.
++   *
++   * \warning {This operation clears the stored data.}
++   *
++   * \returns The byte representation of the blob.
++   */
++  std::vector<uint8_t> GetBytes ();
++
++  /**
++   * Get the bytes representation of the blob.
++   * Note that this operation  \b automatically add the
++   * needed padding at the end (or start) of the blob.
++   *
++   * \warning {This operation clears the stored data.}
++   *
++   * \param [out] buffer The buffer where to store the return data.
++   * \param [in] size The size of the buffer.
++   * \returns The number of bytes actually used in the buffer.
++   */
++  uint8_t GetBytes (uint8_t *buffer, uint32_t size);
++
++private:
++  /**
++   * Add the padding at the start of the blob.
++   */
++  void PadAtStart ();
++
++  /**
++   * Add the padding at the end of the blob.
++   */
++  void PadAtEnd ();
++
++  std::vector<bool> m_blob; //!< Blob of serialized bits.
++  bool m_padAtEnd; //!< True if the padding must be added at the end of the blob.
++};
++
++} // namespace ns3
++
++#endif /* BITSERIALIZER_H_ */
+diff --git a/simulation/src/point-to-point/model/qbb-net-device.cc b/simulation/src/point-to-point/model/qbb-net-device.cc
+index 6d191ed..c6dd46f 100644
+--- a/simulation/src/point-to-point/model/qbb-net-device.cc
++++ b/simulation/src/point-to-point/model/qbb-net-device.cc
+@@ -102,25 +102,37 @@ namespace ns3 {
+ 		int res = -1024;
+ 		uint32_t fcount = m_qpGrp->GetN();
+ 		uint32_t min_finish_id = 0xffffffff;
+-		for (qIndex = 1; qIndex <= fcount; qIndex++){
+-			// iterate start behind the m_rrlast qp
+-			uint32_t idx = (qIndex + m_rrlast) % fcount;
+-			Ptr<RdmaQueuePair> qp = m_qpGrp->Get(idx);
+-			if(qp->GetBytesLeft()<=0){
+-				int sender_node = qp->GetSrc();
+-				int receiver_node = qp->GetDest();
+-				int tag = qp->GetTag();
+-				int t_count = qp->GetInitialSize();
+-				// qp transmission finished
+-			}
+-			if (!paused[qp->m_pg] && qp->GetBytesLeft() > 0 && !qp->IsWinBound()){
+-				if (m_qpGrp->Get(idx)->m_nextAvail.GetTimeStep() > Simulator::Now().GetTimeStep()) //not available now
++		auto findEligibleQp = [&](bool tailOnly) {
++			for (qIndex = 1; qIndex <= fcount; qIndex++){
++				// iterate start behind the m_rrlast qp
++				uint32_t idx = (qIndex + m_rrlast) % fcount;
++				Ptr<RdmaQueuePair> qp = m_qpGrp->Get(idx);
++				if(qp->GetBytesLeft()<=0){
++					int sender_node = qp->GetSrc();
++					int receiver_node = qp->GetDest();
++					int tag = qp->GetTag();
++					int t_count = qp->GetInitialSize();
++					// qp transmission finished
++				}
++				if (tailOnly && !qp->IsTailCritical()){
++					if (qp->IsFinished()){
++						min_finish_id = idx < min_finish_id ? idx : min_finish_id;
++					}
+ 					continue;
+-				res = idx;
+-				break;
+-			}else if (qp->IsFinished()){
+-				min_finish_id = idx < min_finish_id ? idx : min_finish_id;
++				}
++				if (!paused[qp->m_pg] && qp->GetBytesLeft() > 0 && !qp->IsWinBound()){
++					if (m_qpGrp->Get(idx)->m_nextAvail.GetTimeStep() > Simulator::Now().GetTimeStep()) //not available now
++						continue;
++					return (int)idx;
++				}else if (qp->IsFinished()){
++					min_finish_id = idx < min_finish_id ? idx : min_finish_id;
++				}
+ 			}
++			return -1024;
++		};
++		res = findEligibleQp(true);
++		if (res == -1024){
++			res = findEligibleQp(false);
+ 		}
+ 
+ 		// clear the finished qp
+diff --git a/simulation/src/point-to-point/model/rdma-driver.cc b/simulation/src/point-to-point/model/rdma-driver.cc
+index d7b5939..bc56538 100644
+--- a/simulation/src/point-to-point/model/rdma-driver.cc
++++ b/simulation/src/point-to-point/model/rdma-driver.cc
+@@ -65,8 +65,8 @@ void RdmaDriver::SetRdmaHw(Ptr<RdmaHw> rdma){
+ 	m_rdma = rdma;
+ }
+ 
+-void RdmaDriver::AddQueuePair(uint32_t src, uint32_t dest, uint64_t tag, uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Address dip, uint16_t sport, uint16_t dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Callback<void> notifyAppSent){
+-	m_rdma->AddQueuePair(src, dest, tag, size, pg, sip, dip, sport, dport, win, baseRtt, notifyAppFinish, notifyAppSent);
++void RdmaDriver::AddQueuePair(uint32_t src, uint32_t dest, uint64_t tag, uint64_t group_id, uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Address dip, uint16_t sport, uint16_t dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Callback<void> notifyAppSent){
++	m_rdma->AddQueuePair(src, dest, tag, group_id, size, pg, sip, dip, sport, dport, win, baseRtt, notifyAppFinish, notifyAppSent);
+ }
+ 
+ void RdmaDriver::EnbaleNVLS() {
+diff --git a/simulation/src/point-to-point/model/rdma-driver.h b/simulation/src/point-to-point/model/rdma-driver.h
+index 94d33db..aaa8e06 100644
+--- a/simulation/src/point-to-point/model/rdma-driver.h
++++ b/simulation/src/point-to-point/model/rdma-driver.h
+@@ -34,7 +34,7 @@ public:
+ 	void SetRdmaHw(Ptr<RdmaHw> rdma);
+ 
+ 	// add a queue pair
+-	void AddQueuePair(uint32_t src, uint32_t dest, uint64_t tag, uint64_t size, uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Callback<void> notifyAppSent);
++	void AddQueuePair(uint32_t src, uint32_t dest, uint64_t tag, uint64_t group_id, uint64_t size, uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Callback<void> notifyAppSent);
+ 
+ 	// enable NVLS
+ 	void EnbaleNVLS();
+diff --git a/simulation/src/point-to-point/model/rdma-hw.cc b/simulation/src/point-to-point/model/rdma-hw.cc
+index e624698..ada4f0b 100644
+--- a/simulation/src/point-to-point/model/rdma-hw.cc
++++ b/simulation/src/point-to-point/model/rdma-hw.cc
+@@ -15,6 +15,8 @@
+ #ifdef NS3_MTP
+ #include "ns3/mtp-interface.h"
+ #endif
++#include <algorithm>
++#include <cstdlib>
+ #include <iostream>	// debug
+ 
+ namespace ns3{
+@@ -197,7 +199,20 @@ TypeId RdmaHw::GetTypeId (void)
+ 	return tid;
+ }
+ 
+-RdmaHw::RdmaHw(){
++RdmaHw::RdmaHw()
++	: m_enable_barrier_tail_prio(true),
++	  m_barrier_tail_pg(1){
++	const char *enable_env = std::getenv("SIMAI_ENABLE_BARRIER_TAIL_PRIO");
++	if (enable_env != NULL){
++		m_enable_barrier_tail_prio = std::strtol(enable_env, NULL, 10) != 0;
++	}
++	const char *pg_env = std::getenv("SIMAI_BARRIER_TAIL_PG");
++	if (pg_env != NULL){
++		long parsed_pg = std::strtol(pg_env, NULL, 10);
++		if (parsed_pg >= 0 && parsed_pg < (long)QbbNetDevice::qCnt){
++			m_barrier_tail_pg = static_cast<uint16_t>(parsed_pg);
++		}
++	}
+ }
+ 
+ void RdmaHw::enable_nvls() {
+@@ -262,6 +277,9 @@ uint32_t RdmaHw::GetNicIdxOfQp(Ptr<RdmaQueuePair> qp){
+ uint64_t RdmaHw::GetQpKey(uint32_t dip, uint16_t sport, uint16_t pg){
+ 	return ((uint64_t)dip << 32) | ((uint64_t)sport << 16) | (uint64_t)pg;
+ }
++uint64_t RdmaHw::GetBarrierGroupKey(uint32_t dest, uint64_t groupId){
++	return (groupId << 32) | (uint64_t)dest;
++}
+ Ptr<RdmaQueuePair> RdmaHw::GetQp(uint32_t dip, uint16_t sport, uint16_t pg){
+ 	uint64_t key = GetQpKey(dip, sport, pg);
+ 	auto it = m_qpMap.find(key);
+@@ -269,12 +287,102 @@ Ptr<RdmaQueuePair> RdmaHw::GetQp(uint32_t dip, uint16_t sport, uint16_t pg){
+ 		return it->second;
+ 	return NULL;
+ }
+-void RdmaHw::AddQueuePair(uint32_t src, uint32_t dest, uint64_t tag, uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Address dip, uint16_t sport, uint16_t dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Callback<void> notifyAppSent){
++void RdmaHw::SetBarrierTailPriority(Ptr<RdmaQueuePair> qp, bool enable){
++	if (qp == NULL || !m_enable_barrier_tail_prio || qp->GetGroupId() == std::numeric_limits<uint64_t>::max()){
++		return;
++	}
++	bool was_tail_critical = qp->IsTailCritical();
++	if (enable){
++		if (qp->m_pg != m_barrier_tail_pg){
++			uint64_t boost_key = GetQpKey(qp->dip.Get(), qp->sport, m_barrier_tail_pg);
++			m_qpMap[boost_key] = qp;
++			qp->m_pg = m_barrier_tail_pg;
++		}
++		qp->SetTailCritical(true);
++		if (!was_tail_critical){
++			printf("%lu barrier-tail-prio enable node:%u group:%llu src:%u dst:%u sport:%u pg:%u\n",
++				Simulator::Now().GetTimeStep(),
++				m_node->GetId(),
++				(unsigned long long)qp->GetGroupId(),
++				qp->GetSrc(),
++				qp->GetDest(),
++				qp->sport,
++				qp->m_pg);
++		}
++		return;
++	}
++	qp->m_pg = qp->m_base_pg;
++	qp->SetTailCritical(false);
++	if (was_tail_critical){
++		printf("%lu barrier-tail-prio disable node:%u group:%llu src:%u dst:%u sport:%u pg:%u\n",
++			Simulator::Now().GetTimeStep(),
++			m_node->GetId(),
++			(unsigned long long)qp->GetGroupId(),
++			qp->GetSrc(),
++			qp->GetDest(),
++			qp->sport,
++			qp->m_pg);
++	}
++}
++void RdmaHw::RefreshBarrierTailPriority(uint64_t groupKey){
++	auto it = m_barrierTailGroups.find(groupKey);
++	if (it == m_barrierTailGroups.end()){
++		return;
++	}
++	for (auto &src_entry : it->second.active_qps_by_src){
++		for (auto &qp : src_entry.second){
++			SetBarrierTailPriority(qp, false);
++		}
++	}
++	if (it->second.active_qps_by_src.size() == 1 && !it->second.completed_sources.empty()){
++		auto &remaining_qps = it->second.active_qps_by_src.begin()->second;
++		for (auto &qp : remaining_qps){
++			SetBarrierTailPriority(qp, true);
++		}
++	}
++}
++void RdmaHw::RegisterBarrierGroupQp(Ptr<RdmaQueuePair> qp){
++	if (qp == NULL || !m_enable_barrier_tail_prio || qp->GetGroupId() == std::numeric_limits<uint64_t>::max()){
++		return;
++	}
++	uint64_t group_key = GetBarrierGroupKey(qp->GetDest(), qp->GetGroupId());
++	auto &group_state = m_barrierTailGroups[group_key];
++	group_state.active_qps_by_src[qp->GetSrc()].push_back(qp);
++	group_state.completed_sources.erase(qp->GetSrc());
++	RefreshBarrierTailPriority(group_key);
++}
++void RdmaHw::CompleteBarrierGroupQp(Ptr<RdmaQueuePair> qp){
++	if (qp == NULL || !m_enable_barrier_tail_prio || qp->GetGroupId() == std::numeric_limits<uint64_t>::max()){
++		return;
++	}
++	uint64_t group_key = GetBarrierGroupKey(qp->GetDest(), qp->GetGroupId());
++	auto group_it = m_barrierTailGroups.find(group_key);
++	if (group_it == m_barrierTailGroups.end()){
++		return;
++	}
++	auto src_it = group_it->second.active_qps_by_src.find(qp->GetSrc());
++	if (src_it == group_it->second.active_qps_by_src.end()){
++		return;
++	}
++	auto &src_qps = src_it->second;
++	src_qps.erase(std::remove(src_qps.begin(), src_qps.end(), qp), src_qps.end());
++	if (src_qps.empty()){
++		group_it->second.active_qps_by_src.erase(src_it);
++		group_it->second.completed_sources.insert(qp->GetSrc());
++	}
++	if (group_it->second.active_qps_by_src.empty()){
++		m_barrierTailGroups.erase(group_it);
++		return;
++	}
++	RefreshBarrierTailPriority(group_key);
++}
++void RdmaHw::AddQueuePair(uint32_t src, uint32_t dest, uint64_t tag, uint64_t group_id, uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Address dip, uint16_t sport, uint16_t dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Callback<void> notifyAppSent){
+ 	// create qp
+ 	Ptr<RdmaQueuePair> qp = CreateObject<RdmaQueuePair>(pg, sip, dip, sport, dport);
+ 	qp->SetSrc(src);
+ 	qp->SetDest(dest);
+ 	qp->SetTag(tag);
++	qp->SetGroupId(group_id);
+ 	qp->SetSize(size);
+ 	qp->SetInitialSize(size);
+ 	qp->SetWin(win);
+@@ -293,6 +401,7 @@ void RdmaHw::AddQueuePair(uint32_t src, uint32_t dest, uint64_t tag, uint64_t si
+ 	qp_cnp[key] = 0;
+ 	last_qp_cnp[key] = 0;
+ 	last_qp_rate[key] = 0;
++	RegisterBarrierGroupQp(qp);
+ 
+ 	// set init variables
+ 	DataRate m_bps = m_nic[nic_idx].dev->GetDataRate();
+@@ -320,11 +429,14 @@ void RdmaHw::AddQueuePair(uint32_t src, uint32_t dest, uint64_t tag, uint64_t si
+ 
+ void RdmaHw::DeleteQueuePair(Ptr<RdmaQueuePair> qp){
+ 	// remove qp from the m_qpMap
+-	uint64_t key = GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
+-	m_qpMap.erase(key);
+-	qp_cnp.erase(key);
+-	last_qp_cnp.erase(key);
+-	last_qp_rate.erase(key);
++	uint64_t base_key = GetQpKey(qp->dip.Get(), qp->sport, qp->m_base_pg);
++	m_qpMap.erase(base_key);
++	if (qp->m_base_pg != m_barrier_tail_pg){
++		m_qpMap.erase(GetQpKey(qp->dip.Get(), qp->sport, m_barrier_tail_pg));
++	}
++	qp_cnp.erase(base_key);
++	last_qp_cnp.erase(base_key);
++	last_qp_rate.erase(base_key);
+ }
+ 
+ Ptr<RdmaRxQueuePair> RdmaHw::GetRxQp(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint16_t pg, bool create){
+@@ -541,7 +653,7 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch){
+ 
+ 	// handle cnp
+ 	if (cnp){
+-		uint64_t key = GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
++		uint64_t key = GetQpKey(qp->dip.Get(), qp->sport, qp->m_base_pg);
+ 		qp_cnp[key]++; // update for the number of cnp this qp has received
+ 		if (m_cc_mode == 1){ // mlx version
+ 			cnp_received_mlx(qp);
+@@ -634,6 +746,7 @@ void RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp){
+ 		Simulator::Cancel(qp->mlx.m_eventDecreaseRate);
+ 		Simulator::Cancel(qp->mlx.m_rpTimer);
+ 	}
++	CompleteBarrierGroupQp(qp);
+ 
+ 	// This callback will log info
+ 	// It may also delete the rxQp on the receiver
+diff --git a/simulation/src/point-to-point/model/rdma-hw.h b/simulation/src/point-to-point/model/rdma-hw.h
+index cf4512e..130abba 100644
+--- a/simulation/src/point-to-point/model/rdma-hw.h
++++ b/simulation/src/point-to-point/model/rdma-hw.h
+@@ -23,6 +23,11 @@ struct RdmaInterfaceMgr{
+ 	}
+ };
+ 
++struct BarrierTailGroupState {
++	std::unordered_map<uint32_t, std::vector<Ptr<RdmaQueuePair> > > active_qps_by_src;
++	std::set<uint32_t> completed_sources;
++};
++
+ class RdmaHw : public Object {
+ public:
+ 
+@@ -62,10 +67,18 @@ public:
+ 	std::vector<uint64_t> last_tx_bytes; // last sampling value <port_id, tx_bytes>
+ 	std::unordered_map<uint64_t, uint32_t> last_qp_cnp; // last sampling value key of qp ---> received cnp number
+ 	std::unordered_map<uint64_t, uint64_t> last_qp_rate; // last sampling value key of qp ---> sending rate
++	bool m_enable_barrier_tail_prio;
++	uint16_t m_barrier_tail_pg;
++	std::unordered_map<uint64_t, BarrierTailGroupState> m_barrierTailGroups;
+ 	void UpdateTxBytes(uint32_t port_id, uint64_t bytes);
+ 	void PrintHostBW(FILE* bw_output, uint32_t bw_mon_interval);
+ 	void PrintQPRate(FILE* rate_output);
+ 	void PrintQPCnpNumber(FILE* cnp_output);
++	static uint64_t GetBarrierGroupKey(uint32_t dest, uint64_t groupId);
++	void RegisterBarrierGroupQp(Ptr<RdmaQueuePair> qp);
++	void CompleteBarrierGroupQp(Ptr<RdmaQueuePair> qp);
++	void RefreshBarrierTailPriority(uint64_t groupKey);
++	void SetBarrierTailPriority(Ptr<RdmaQueuePair> qp, bool enable);
+ 
+ 	// nvls
+ 	void enable_nvls();
+@@ -77,7 +90,7 @@ public:
+ 	static uint64_t GetQpKey(uint32_t dip, uint16_t sport, uint16_t pg); // get the lookup key for m_qpMap
+ 	Ptr<RdmaQueuePair> GetQp(uint32_t dip, uint16_t sport, uint16_t pg); // get the qp
+ 	uint32_t GetNicIdxOfQp(Ptr<RdmaQueuePair> qp); // get the NIC index of the qp
+-	void AddQueuePair(uint32_t src, uint32_t dest, uint64_t tag, uint64_t size, uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Callback<void> notifyAppSent); // add a new qp (new send)
++	void AddQueuePair(uint32_t src, uint32_t dest, uint64_t tag, uint64_t group_id, uint64_t size, uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Callback<void> notifyAppSent); // add a new qp (new send)
+ 	void DeleteQueuePair(Ptr<RdmaQueuePair> qp);
+ 
+ 	Ptr<RdmaRxQueuePair> GetRxQp(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint16_t pg, bool create); // get a rxQp
+diff --git a/simulation/src/point-to-point/model/rdma-queue-pair.cc b/simulation/src/point-to-point/model/rdma-queue-pair.cc
+index dfb99a1..73bb81b 100644
+--- a/simulation/src/point-to-point/model/rdma-queue-pair.cc
++++ b/simulation/src/point-to-point/model/rdma-queue-pair.cc
+@@ -33,7 +33,10 @@ RdmaQueuePair::RdmaQueuePair(uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, ui
+ 	m_tag = -1;
+ 	snd_nxt = snd_una = 0;
+ 	m_pg = pg;
++	m_base_pg = pg;
+ 	m_ipid = 0;
++	m_group_id = std::numeric_limits<uint64_t>::max();
++	m_tail_critical = false;
+ 	m_win = 0;
+ 	m_baseRtt = 0;
+ 	m_max_rate = 0;
+@@ -99,10 +102,22 @@ void RdmaQueuePair::SetTag(uint64_t tag){
+ uint64_t RdmaQueuePair::GetTag(){
+ 	return m_tag;
+ }
++uint64_t RdmaQueuePair::GetGroupId() const{
++	return m_group_id;
++}
++bool RdmaQueuePair::IsTailCritical() const{
++	return m_tail_critical;
++}
+ 
+ void RdmaQueuePair::SetInitialSize(uint64_t size){
+ 	m_init_size = size;
+ }
++void RdmaQueuePair::SetGroupId(uint64_t groupId){
++	m_group_id = groupId;
++}
++void RdmaQueuePair::SetTailCritical(bool enabled){
++	m_tail_critical = enabled;
++}
+ 
+ uint64_t RdmaQueuePair::GetInitialSize(){
+ 	return m_init_size;
+diff --git a/simulation/src/point-to-point/model/rdma-queue-pair.h b/simulation/src/point-to-point/model/rdma-queue-pair.h
+index b2876bd..23395a2 100644
+--- a/simulation/src/point-to-point/model/rdma-queue-pair.h
++++ b/simulation/src/point-to-point/model/rdma-queue-pair.h
+@@ -8,6 +8,7 @@
+ #include <ns3/event-id.h>
+ #include <ns3/custom-header.h>
+ #include <ns3/int-header.h>
++#include <limits>
+ #include <vector>
+ 
+ namespace ns3 {
+@@ -21,7 +22,10 @@ public:
+ 	uint32_t m_src, m_dest;
+ 	uint64_t snd_nxt, snd_una; // next seq to send, the highest unacked seq
+ 	uint16_t m_pg;
++	uint16_t m_base_pg;
+ 	uint16_t m_ipid;
++	uint64_t m_group_id;
++	bool m_tail_critical;
+ 	uint32_t m_win; // bound of on-the-fly packets
+ 	uint64_t m_baseRtt; // base RTT of this qp
+ 	DataRate m_max_rate; // max rate
+@@ -99,7 +103,11 @@ public:
+ 	uint32_t GetSrc();
+ 	uint32_t GetDest();
+ 	uint64_t GetTag();
++	uint64_t GetGroupId() const;
++	bool IsTailCritical() const;
+ 	void SetTag(uint64_t tag);void SetSrc(uint32_t src);void SetDest(uint32_t dest);void SetInitialSize(uint64_t size);
++	void SetGroupId(uint64_t groupId);
++	void SetTailCritical(bool enabled);
+ 	uint32_t GetHash(void);
+ 	void Acknowledge(uint64_t ack);
+ 	uint64_t GetOnTheFly();
