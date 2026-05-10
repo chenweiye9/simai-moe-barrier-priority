@@ -130,6 +130,7 @@ namespace MockNccl {
     std::map<int,TreeChannels> Alltreechannels;
     std::map<int,TreeChannels> AllNVLSchannels;
 
+    int total_gpus;
     int g_flow_id;
     GPUType gpu_type;
     std::map<std::string,int> FlowName2nums;
@@ -138,6 +139,7 @@ namespace MockNccl {
     std::shared_ptr<void> getFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size,int layer_num,State loopstate);
    private:
     std::map<int,std::shared_ptr<FlowModels>> genFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size);
+    std::map<int,std::shared_ptr<FlowModels>> genIncastFlowModels(GroupType type, int rank, uint64_t data_size);
     std::map<int,std::shared_ptr<FlowModels>> genReduceScatterFlowModels(GroupType type , int rank, uint64_t data_size);
     std::map<int,std::shared_ptr<FlowModels>> genAlltoAllFlowModels(GroupType type, int rank, uint64_t data_size);
     std::map<int,std::shared_ptr<FlowModels>> genAllReduceFlowModels(GroupType type , int rank,uint64_t data_size);

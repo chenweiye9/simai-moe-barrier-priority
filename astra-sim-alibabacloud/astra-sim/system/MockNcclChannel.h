@@ -24,6 +24,7 @@
 namespace MockNccl {
   struct SingleFlow{
     int flow_id;
+    int logical_group_id;
     int src;
     int dest;
     uint64_t flow_size;
@@ -34,7 +35,7 @@ namespace MockNccl {
     int chunk_id;
     int chunk_count;
     std::string conn_type;
-    SingleFlow(){};
+    SingleFlow() : logical_group_id(-1) {};
     SingleFlow(
         int _flow_id,
         int _src,
@@ -47,7 +48,34 @@ namespace MockNccl {
         int _chunk_id,
         int _chunk_count,
         std::string _conn_type)
+        : SingleFlow(
+              _flow_id,
+              _flow_id,
+              _src,
+              _dest,
+              _flow_size,
+              _prev,
+              _parent_flow_id,
+              _child_flow_id,
+              _channel_id,
+              _chunk_id,
+              _chunk_count,
+              _conn_type) {}
+    SingleFlow(
+        int _flow_id,
+        int _logical_group_id,
+        int _src,
+        int _dest,
+        uint64_t _flow_size,
+        std::vector<int>_prev,
+        std::vector<int> _parent_flow_id,
+        std::vector<int> _child_flow_id,
+        int _channel_id,
+        int _chunk_id,
+        int _chunk_count,
+        std::string _conn_type)
         : flow_id(_flow_id),
+          logical_group_id(_logical_group_id),
           src(_src),
           dest(_dest),
           flow_size(_flow_size),

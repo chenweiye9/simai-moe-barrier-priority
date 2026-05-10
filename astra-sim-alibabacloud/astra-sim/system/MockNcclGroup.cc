@@ -20,10 +20,11 @@
 #include <queue>
 #include <cmath>
 #include <algorithm>
+#include <random>
 #include "astra-sim/system/MockNcclLog.h"
 using namespace std;
 namespace MockNccl {
-  MockNcclGroup::MockNcclGroup(int _ngpus,int _gpus_per_nodes,int _TP_size,int _DP_size,int _PP_size,int _EP_size,int _DP_EP_size,std::vector<int>_NVSwitch,GPUType _gpu_type):g_flow_id(0),gpu_type(_gpu_type){
+  MockNcclGroup::MockNcclGroup(int _ngpus,int _gpus_per_nodes,int _TP_size,int _DP_size,int _PP_size,int _EP_size,int _DP_EP_size,std::vector<int>_NVSwitch,GPUType _gpu_type):total_gpus(_ngpus),g_flow_id(0),gpu_type(_gpu_type){
     /*init groups
     */
     MockNcclLog *NcclLog = MockNcclLog::getInstance();
@@ -283,6 +284,9 @@ namespace MockNccl {
     GroupInfo gp_info;
     int gp_idx;
     int end_rank;
+    bool force_incast = false;
+    bool incast_use_all_ranks = false;
+    int random_incast_group_count = 0;
     MockNcclLog* NcclLog = MockNcclLog::getInstance();
     if(GroupIndex.count(std::make_pair(rank,type))==0){
       NcclLog->writeLog(NcclLogLevel::ERROR,"There is no corresponding group info and group ring channel, resulting in an error in generating the flow model.");
@@ -306,7 +310,61 @@ namespace MockNccl {
       default:
         break;
     }
+    const char* incast_env = std::getenv("SIMAI_FORCE_INCAST_FLOW_MODEL");
+    if (incast_env != nullptr) {
+      force_incast = std::strtol(incast_env, nullptr, 10) != 0;
+    }
+    const char* incast_all_ranks_env = std::getenv("SIMAI_INCAST_USE_ALL_RANKS");
+    if (incast_all_ranks_env != nullptr) {
+      incast_use_all_ranks = std::strtol(incast_all_ranks_env, nullptr, 10) != 0;
+    }
+    const char* random_group_count_env = std::getenv("SIMAI_INCAST_RANDOM_GROUP_COUNT");
+    if (random_group_count_env != nullptr) {
+      random_incast_group_count = std::strtol(random_group_count_env, nullptr, 10);
+      if (random_incast_group_count > 0) {
+        force_incast = true;
+      }
+    }
+    if (force_incast && op != AstraSim::ComType::All_to_All) {
+      force_incast = false;
+    }
     flow_model_name = flow_model_name + "_" + std::to_string(gp_idx) + "_" + std::to_string(layer_num) + "_" + std::to_string(static_cast<int>(loopstate)) + "_" + std::to_string(static_cast<int>(op)) + "_" + std::to_string(data_size);
+    if (force_incast) {
+      if (random_incast_group_count > 0) {
+        int random_seed = 1;
+        int random_min_senders = 2;
+        int random_max_senders = total_gpus > 1 ? total_gpus - 1 : 1;
+        const char* random_seed_env = std::getenv("SIMAI_INCAST_RANDOM_SEED");
+        const char* random_min_senders_env = std::getenv("SIMAI_INCAST_RANDOM_MIN_SENDERS");
+        const char* random_max_senders_env = std::getenv("SIMAI_INCAST_RANDOM_MAX_SENDERS");
+        if (random_seed_env != nullptr) {
+          random_seed = std::strtol(random_seed_env, nullptr, 10);
+        }
+        if (random_min_senders_env != nullptr) {
+          random_min_senders = std::strtol(random_min_senders_env, nullptr, 10);
+        }
+        if (random_max_senders_env != nullptr) {
+          random_max_senders = std::strtol(random_max_senders_env, nullptr, 10);
+        }
+        flow_model_name =
+            "GLOBAL_RANDOM_INCAST_" + std::to_string(random_incast_group_count) +
+            "_" + std::to_string(random_seed) + "_" +
+            std::to_string(random_min_senders) + "_" +
+            std::to_string(random_max_senders) + "_" +
+            std::to_string(layer_num) + "_" +
+            std::to_string(static_cast<int>(loopstate)) + "_" +
+            std::to_string(static_cast<int>(op)) + "_" +
+            std::to_string(data_size);
+      } else if (incast_use_all_ranks) {
+        flow_model_name =
+            "GLOBAL_INCAST_" + std::to_string(layer_num) + "_" +
+            std::to_string(static_cast<int>(loopstate)) + "_" +
+            std::to_string(static_cast<int>(op)) + "_" +
+            std::to_string(data_size);
+      } else {
+        flow_model_name = "INCAST_" + flow_model_name;
+      }
+    }
     if(flow_models.count(flow_model_name)){
       FlowName2nums[flow_model_name] ++;
       std::shared_ptr<void> presult;
@@ -317,10 +375,256 @@ namespace MockNccl {
       }
       return presult;
     } else {
-      flow_models[flow_model_name] = genFlowModels(type,rank,op,data_size);
+      flow_models[flow_model_name] = force_incast ? genIncastFlowModels(type, rank, data_size) : genFlowModels(type,rank,op,data_size);
       FlowName2nums[flow_model_name]= 1;
       return flow_models[flow_model_name][rank];
     }
+  }
+
+  std::map<int,std::shared_ptr<FlowModels>> MockNcclGroup::genIncastFlowModels(GroupType type, int rank, uint64_t data_size){
+    std::map<int,std::shared_ptr<FlowModels>> rank2pflowmodels;
+    std::map<int,FlowModels> rank2flowmodels;
+    MockNcclLog* NcclLog = MockNcclLog::getInstance();
+    bool use_all_ranks = false;
+    const char* all_ranks_env = std::getenv("SIMAI_INCAST_USE_ALL_RANKS");
+    if (all_ranks_env != nullptr){
+      use_all_ranks = std::strtol(all_ranks_env, nullptr, 10) != 0;
+    }
+    if(!use_all_ranks && GroupIndex.count(std::make_pair(rank,type))==0){
+      NcclLog->writeLog(NcclLogLevel::ERROR,"There is no corresponding group info, resulting in an error in genIncastFlowModels.");
+      return {};
+    }
+
+    std::vector<int> candidate_ranks;
+    if (use_all_ranks){
+      for (int r = 0; r < total_gpus; r++){
+        candidate_ranks.push_back(r);
+      }
+    } else {
+      int gp_idx = GroupIndex[std::make_pair(rank,type)];
+      GroupInfo gp_info = AllGroups[gp_idx];
+      candidate_ranks = gp_info.Ranks;
+    }
+    if (candidate_ranks.size() < 2){
+      return {};
+    }
+
+    int random_incast_group_count = 0;
+    const char* random_group_count_env = std::getenv("SIMAI_INCAST_RANDOM_GROUP_COUNT");
+    if (random_group_count_env != nullptr){
+      random_incast_group_count = std::strtol(random_group_count_env, nullptr, 10);
+    }
+
+    if (random_incast_group_count > 0){
+      int random_seed = 1;
+      int random_min_senders = 2;
+      int random_max_senders = std::max(1, static_cast<int>(candidate_ranks.size()) - 1);
+      const char* random_seed_env = std::getenv("SIMAI_INCAST_RANDOM_SEED");
+      const char* random_min_senders_env = std::getenv("SIMAI_INCAST_RANDOM_MIN_SENDERS");
+      const char* random_max_senders_env = std::getenv("SIMAI_INCAST_RANDOM_MAX_SENDERS");
+      if (random_seed_env != nullptr){
+        random_seed = std::strtol(random_seed_env, nullptr, 10);
+      }
+      if (random_min_senders_env != nullptr){
+        random_min_senders = std::strtol(random_min_senders_env, nullptr, 10);
+      }
+      if (random_max_senders_env != nullptr){
+        random_max_senders = std::strtol(random_max_senders_env, nullptr, 10);
+      }
+      random_min_senders = std::max(1, random_min_senders);
+      random_max_senders = std::max(random_min_senders, random_max_senders);
+
+      std::mt19937 rng(random_seed);
+      std::vector<int> receiver_candidates = candidate_ranks;
+      std::shuffle(receiver_candidates.begin(), receiver_candidates.end(), rng);
+
+      FlowModels result = {};
+      for (int group_idx = 0; group_idx < random_incast_group_count; ++group_idx){
+        if (receiver_candidates.empty()){
+          receiver_candidates = candidate_ranks;
+          std::shuffle(receiver_candidates.begin(), receiver_candidates.end(), rng);
+        }
+        int receiver_rank = receiver_candidates.back();
+        receiver_candidates.pop_back();
+
+        std::vector<int> senders;
+        for (int r : candidate_ranks){
+          if (r != receiver_rank){
+            senders.push_back(r);
+          }
+        }
+        if (senders.empty()){
+          continue;
+        }
+
+        std::shuffle(senders.begin(), senders.end(), rng);
+        int max_allowed = static_cast<int>(senders.size());
+        int low = std::min(random_min_senders, max_allowed);
+        int high = std::min(random_max_senders, max_allowed);
+        low = std::max(1, low);
+        high = std::max(low, high);
+        int sender_count = std::uniform_int_distribution<int>(low, high)(rng);
+        senders.resize(sender_count);
+
+        std::string sender_desc;
+        for (size_t idx = 0; idx < senders.size(); ++idx){
+          if (!sender_desc.empty()){
+            sender_desc += ",";
+          }
+          sender_desc += std::to_string(senders[idx]);
+        }
+        NcclLog->writeLog(
+            NcclLogLevel::INFO,
+            "[random-incast] seed %d group %d receiver %d sender_count %d senders [%s] bytes %llu",
+            random_seed,
+            group_idx,
+            receiver_rank,
+            sender_count,
+            sender_desc.c_str(),
+            (unsigned long long)data_size);
+        int logical_group_id = random_seed * 1000 + group_idx;
+
+        for (int sender_rank : senders){
+          std::vector<int> prevranks = {sender_rank};
+          SingleFlow flow(
+              g_flow_id,
+              logical_group_id,
+              sender_rank,
+              receiver_rank,
+              data_size,
+              prevranks,
+              {},
+              {},
+              0,
+              0,
+              1,
+              "RING");
+          result[std::make_pair(0, g_flow_id)] = flow;
+          g_flow_id++;
+        }
+      }
+
+      for (auto flow_models_it = result.begin(); flow_models_it != result.end(); flow_models_it++){
+        int src = flow_models_it->second.src;
+        int dst = flow_models_it->second.dest;
+        rank2flowmodels[src][std::make_pair(flow_models_it->first.first, flow_models_it->first.second)] = flow_models_it->second;
+        rank2flowmodels[dst][std::make_pair(flow_models_it->first.first, flow_models_it->first.second)] = flow_models_it->second;
+      }
+      for (auto it = rank2flowmodels.begin(); it != rank2flowmodels.end(); it++){
+        rank2pflowmodels[it->first] = std::make_shared<FlowModels>(it->second);
+      }
+      return rank2pflowmodels;
+    }
+
+    int receiver_rank = candidate_ranks[0];
+    const char* receiver_env = std::getenv("SIMAI_INCAST_RECEIVER_RANK");
+    if (receiver_env != nullptr){
+      int requested_receiver = std::strtol(receiver_env, nullptr, 10);
+      if (std::find(candidate_ranks.begin(), candidate_ranks.end(), requested_receiver) != candidate_ranks.end()){
+        receiver_rank = requested_receiver;
+      }
+    }
+
+    std::vector<int> senders;
+    for (int r : candidate_ranks){
+      if (r != receiver_rank){
+        senders.push_back(r);
+      }
+    }
+
+    const char* sender_env = std::getenv("SIMAI_INCAST_SENDERS");
+    if (sender_env != nullptr){
+      int requested_senders = std::strtol(sender_env, nullptr, 10);
+      if (requested_senders > 0 && requested_senders < (int)senders.size()){
+        senders.resize(requested_senders);
+      }
+    }
+
+    FlowModels result = {};
+    const char* background_receiver_env = std::getenv("SIMAI_INCAST_BACKGROUND_RECEIVER_RANK");
+    const char* background_senders_env = std::getenv("SIMAI_INCAST_BACKGROUND_SENDERS");
+    const char* background_bytes_env = std::getenv("SIMAI_INCAST_BACKGROUND_BYTES");
+    bool enable_background = false;
+    int background_receiver_rank = -1;
+    int background_sender_count = 0;
+    uint64_t background_data_size = data_size;
+    if (background_receiver_env != nullptr){
+      background_receiver_rank = std::strtol(background_receiver_env, nullptr, 10);
+      enable_background = true;
+    }
+    if (background_senders_env != nullptr){
+      background_sender_count = std::strtol(background_senders_env, nullptr, 10);
+    }
+    if (background_bytes_env != nullptr){
+      uint64_t parsed_background_size = std::strtoull(background_bytes_env, nullptr, 10);
+      if (parsed_background_size > 0){
+        background_data_size = parsed_background_size;
+      }
+    }
+    int primary_logical_group_id = receiver_rank;
+    for (int sender_rank : senders){
+      std::vector<int> prevranks = {sender_rank};
+      SingleFlow flow(
+          g_flow_id,
+          primary_logical_group_id,
+          sender_rank,
+          receiver_rank,
+          data_size,
+          prevranks,
+          {},
+          {},
+          0,
+          0,
+          1,
+          "RING");
+      result[std::make_pair(0, g_flow_id)] = flow;
+      g_flow_id++;
+    }
+
+    if (enable_background &&
+        background_receiver_rank >= 0 &&
+        background_receiver_rank < total_gpus &&
+        background_receiver_rank != receiver_rank){
+      std::vector<int> background_senders;
+      for (int r : candidate_ranks){
+        if (r != background_receiver_rank && r != receiver_rank){
+          background_senders.push_back(r);
+        }
+      }
+      if (background_sender_count > 0 && background_sender_count < (int)background_senders.size()){
+        background_senders.resize(background_sender_count);
+      }
+      int background_logical_group_id = total_gpus + background_receiver_rank;
+      for (int sender_rank : background_senders){
+        std::vector<int> prevranks = {sender_rank};
+        SingleFlow flow(
+            g_flow_id,
+            background_logical_group_id,
+            sender_rank,
+            background_receiver_rank,
+            background_data_size,
+            prevranks,
+            {},
+            {},
+            0,
+            0,
+            1,
+            "RING");
+        result[std::make_pair(0, g_flow_id)] = flow;
+        g_flow_id++;
+      }
+    }
+
+    for (auto flow_models_it = result.begin(); flow_models_it != result.end(); flow_models_it++){
+      int src = flow_models_it->second.src;
+      int dst = flow_models_it->second.dest;
+      rank2flowmodels[src][std::make_pair(flow_models_it->first.first, flow_models_it->first.second)] = flow_models_it->second;
+      rank2flowmodels[dst][std::make_pair(flow_models_it->first.first, flow_models_it->first.second)] = flow_models_it->second;
+    }
+    for (auto it = rank2flowmodels.begin(); it != rank2flowmodels.end(); it++){
+      rank2pflowmodels[it->first] = std::make_shared<FlowModels>(it->second);
+    }
+    return rank2pflowmodels;
   }
 
   std::map<int,std::shared_ptr<FlowModels>> MockNcclGroup::genFlowModels(GroupType type , int rank, AstraSim::ComType op,uint64_t data_size){

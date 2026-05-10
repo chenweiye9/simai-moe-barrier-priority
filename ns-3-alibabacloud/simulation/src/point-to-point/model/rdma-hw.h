@@ -12,6 +12,8 @@
 
 namespace ns3 {
 
+class RdmaHw;
+
 struct RdmaInterfaceMgr{
 	// The QbbDevice dev contains many qps in qpGrp
 	Ptr<QbbNetDevice> dev;
@@ -23,9 +25,23 @@ struct RdmaInterfaceMgr{
 	}
 };
 
+struct BarrierTailQpRef {
+	RdmaHw* owner;
+	Ptr<RdmaQueuePair> qp;
+
+	BarrierTailQpRef() : owner(nullptr), qp(NULL) {}
+	BarrierTailQpRef(RdmaHw* _owner, Ptr<RdmaQueuePair> _qp) : owner(_owner), qp(_qp) {}
+};
+
 struct BarrierTailGroupState {
-	std::unordered_map<uint32_t, std::vector<Ptr<RdmaQueuePair> > > active_qps_by_src;
+	std::unordered_map<uint32_t, std::vector<BarrierTailQpRef> > active_qps_by_src;
 	std::set<uint32_t> completed_sources;
+	std::unordered_map<uint32_t, uint64_t> source_initial_bytes;
+	uint32_t max_sources_seen;
+	bool has_boosted_src;
+	uint32_t boosted_src;
+
+	BarrierTailGroupState() : max_sources_seen(0), has_boosted_src(false), boosted_src(0) {}
 };
 
 class RdmaHw : public Object {
@@ -68,8 +84,13 @@ public:
 	std::unordered_map<uint64_t, uint32_t> last_qp_cnp; // last sampling value key of qp ---> received cnp number
 	std::unordered_map<uint64_t, uint64_t> last_qp_rate; // last sampling value key of qp ---> sending rate
 	bool m_enable_barrier_tail_prio;
+	bool m_debug_barrier_tail_prio;
 	uint16_t m_barrier_tail_pg;
-	std::unordered_map<uint64_t, BarrierTailGroupState> m_barrierTailGroups;
+	uint32_t m_barrier_tail_max_active_srcs;
+	double m_barrier_tail_trigger_completed_ratio;
+	double m_barrier_tail_laggard_ratio;
+	uint64_t m_barrier_tail_min_remaining_bytes;
+	static std::unordered_map<uint64_t, BarrierTailGroupState> s_barrierTailGroups;
 	void UpdateTxBytes(uint32_t port_id, uint64_t bytes);
 	void PrintHostBW(FILE* bw_output, uint32_t bw_mon_interval);
 	void PrintQPRate(FILE* rate_output);

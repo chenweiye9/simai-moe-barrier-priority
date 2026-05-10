@@ -1,0 +1,3 @@
+HYBRID_TRANSFORMER_FWD_IN_BCKWD model_parallel_NPU_group: 2 ep: 4 pp: 1 vpp: 1 ga: 1 all_gpus: 8 checkpoints: 0 checkpoint_initiates: 0
+1
+moe_dispatch_1  -1 1    ALLTOALL_EP 67108864  1    ALLTOALL_EP 67108864  1 NONE 0 100

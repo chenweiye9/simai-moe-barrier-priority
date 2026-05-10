@@ -275,7 +275,13 @@ int main(int argc, char *argv[]) {
 
   std::map<int, int> node2nvswitch; 
   for(int i = 0; i < gpu_num; ++ i) {
-    node2nvswitch[i] = gpu_num + i / gpus_per_server;
+    if (nvswitch_num > 0) {
+      node2nvswitch[i] = gpu_num + i / gpus_per_server;
+    } else {
+      // No NVSwitch nodes in the topology: keep the GPU node id as a
+      // placeholder so upper layers can still initialize safely.
+      node2nvswitch[i] = i;
+    }
   }
   for(int i = gpu_num; i < gpu_num + nvswitch_num; ++ i){
     node2nvswitch[i] = i;

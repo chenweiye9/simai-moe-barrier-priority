@@ -21,6 +21,8 @@
 
 namespace ns3{
 
+std::unordered_map<uint64_t, BarrierTailGroupState> RdmaHw::s_barrierTailGroups;
+
 TypeId RdmaHw::GetTypeId (void)
 {
 	static TypeId tid = TypeId ("ns3::RdmaHw")
@@ -201,16 +203,53 @@ TypeId RdmaHw::GetTypeId (void)
 
 RdmaHw::RdmaHw()
 	: m_enable_barrier_tail_prio(true),
-	  m_barrier_tail_pg(1){
+	  m_debug_barrier_tail_prio(false),
+	  m_barrier_tail_pg(1),
+	  m_barrier_tail_max_active_srcs(1),
+	  m_barrier_tail_trigger_completed_ratio(1.0),
+	  m_barrier_tail_laggard_ratio(1.0),
+	  m_barrier_tail_min_remaining_bytes(0){
 	const char *enable_env = std::getenv("SIMAI_ENABLE_BARRIER_TAIL_PRIO");
 	if (enable_env != NULL){
 		m_enable_barrier_tail_prio = std::strtol(enable_env, NULL, 10) != 0;
+	}
+	const char *debug_env = std::getenv("SIMAI_DEBUG_BARRIER_TAIL_PRIO");
+	if (debug_env != NULL){
+		m_debug_barrier_tail_prio = std::strtol(debug_env, NULL, 10) != 0;
 	}
 	const char *pg_env = std::getenv("SIMAI_BARRIER_TAIL_PG");
 	if (pg_env != NULL){
 		long parsed_pg = std::strtol(pg_env, NULL, 10);
 		if (parsed_pg >= 0 && parsed_pg < (long)QbbNetDevice::qCnt){
 			m_barrier_tail_pg = static_cast<uint16_t>(parsed_pg);
+		}
+	}
+	const char *max_active_env = std::getenv("SIMAI_BARRIER_TAIL_MAX_ACTIVE_SRCS");
+	if (max_active_env != NULL){
+		long parsed_max_active = std::strtol(max_active_env, NULL, 10);
+		if (parsed_max_active > 0){
+			m_barrier_tail_max_active_srcs = static_cast<uint32_t>(parsed_max_active);
+		}
+	}
+	const char *completed_ratio_env = std::getenv("SIMAI_BARRIER_TAIL_COMPLETED_RATIO");
+	if (completed_ratio_env != NULL){
+		double parsed_ratio = std::strtod(completed_ratio_env, NULL);
+		if (parsed_ratio >= 0.0 && parsed_ratio <= 1.0){
+			m_barrier_tail_trigger_completed_ratio = parsed_ratio;
+		}
+	}
+	const char *laggard_ratio_env = std::getenv("SIMAI_BARRIER_TAIL_LAGGARD_RATIO");
+	if (laggard_ratio_env != NULL){
+		double parsed_ratio = std::strtod(laggard_ratio_env, NULL);
+		if (parsed_ratio >= 1.0){
+			m_barrier_tail_laggard_ratio = parsed_ratio;
+		}
+	}
+	const char *min_remaining_env = std::getenv("SIMAI_BARRIER_TAIL_MIN_REMAINING_BYTES");
+	if (min_remaining_env != NULL){
+		long long parsed_bytes = std::strtoll(min_remaining_env, NULL, 10);
+		if (parsed_bytes >= 0){
+			m_barrier_tail_min_remaining_bytes = static_cast<uint64_t>(parsed_bytes);
 		}
 	}
 }
@@ -293,11 +332,6 @@ void RdmaHw::SetBarrierTailPriority(Ptr<RdmaQueuePair> qp, bool enable){
 	}
 	bool was_tail_critical = qp->IsTailCritical();
 	if (enable){
-		if (qp->m_pg != m_barrier_tail_pg){
-			uint64_t boost_key = GetQpKey(qp->dip.Get(), qp->sport, m_barrier_tail_pg);
-			m_qpMap[boost_key] = qp;
-			qp->m_pg = m_barrier_tail_pg;
-		}
 		qp->SetTailCritical(true);
 		if (!was_tail_critical){
 			printf("%lu barrier-tail-prio enable node:%u group:%llu src:%u dst:%u sport:%u pg:%u\n",
@@ -307,11 +341,10 @@ void RdmaHw::SetBarrierTailPriority(Ptr<RdmaQueuePair> qp, bool enable){
 				qp->GetSrc(),
 				qp->GetDest(),
 				qp->sport,
-				qp->m_pg);
+				qp->m_base_pg);
 		}
 		return;
 	}
-	qp->m_pg = qp->m_base_pg;
 	qp->SetTailCritical(false);
 	if (was_tail_critical){
 		printf("%lu barrier-tail-prio disable node:%u group:%llu src:%u dst:%u sport:%u pg:%u\n",
@@ -321,34 +354,145 @@ void RdmaHw::SetBarrierTailPriority(Ptr<RdmaQueuePair> qp, bool enable){
 			qp->GetSrc(),
 			qp->GetDest(),
 			qp->sport,
-			qp->m_pg);
+			qp->m_base_pg);
 	}
 }
 void RdmaHw::RefreshBarrierTailPriority(uint64_t groupKey){
-	auto it = m_barrierTailGroups.find(groupKey);
-	if (it == m_barrierTailGroups.end()){
+	auto it = s_barrierTailGroups.find(groupKey);
+	if (it == s_barrierTailGroups.end()){
 		return;
 	}
-	for (auto &src_entry : it->second.active_qps_by_src){
-		for (auto &qp : src_entry.second){
-			SetBarrierTailPriority(qp, false);
+	size_t active_srcs = it->second.active_qps_by_src.size();
+	size_t completed_srcs = it->second.completed_sources.size();
+	uint32_t total_seen_srcs = std::max(
+		it->second.max_sources_seen,
+		static_cast<uint32_t>(active_srcs + completed_srcs));
+	if (active_srcs == 0){
+		return;
+	}
+
+	bool should_boost = false;
+	uint32_t candidate_src = 0;
+	uint64_t candidate_remaining_bytes = 0;
+	uint64_t second_remaining_bytes = 0;
+	double completed_ratio = total_seen_srcs == 0
+		? 0.0
+		: static_cast<double>(completed_srcs) / static_cast<double>(total_seen_srcs);
+	uint64_t group_initial_bytes = 0;
+	uint64_t group_remaining_bytes = 0;
+	for (auto &initial_entry : it->second.source_initial_bytes){
+		group_initial_bytes += initial_entry.second;
+	}
+
+	if (active_srcs == 1 && completed_srcs > 0){
+		candidate_src = it->second.active_qps_by_src.begin()->first;
+		should_boost = true;
+	}else if (active_srcs <= m_barrier_tail_max_active_srcs){
+		for (auto &src_entry : it->second.active_qps_by_src){
+			uint64_t remaining_bytes = 0;
+			for (auto &qp_ref : src_entry.second){
+				if (qp_ref.qp != NULL){
+					remaining_bytes += qp_ref.qp->GetBytesLeft();
+				}
+			}
+			group_remaining_bytes += remaining_bytes;
+			if (remaining_bytes >= candidate_remaining_bytes){
+				second_remaining_bytes = candidate_remaining_bytes;
+				candidate_remaining_bytes = remaining_bytes;
+				candidate_src = src_entry.first;
+			}else if (remaining_bytes > second_remaining_bytes){
+				second_remaining_bytes = remaining_bytes;
+			}
+		}
+		double progress_ratio = group_initial_bytes == 0
+			? 0.0
+			: 1.0 - (static_cast<double>(group_remaining_bytes) / static_cast<double>(group_initial_bytes));
+		bool remaining_ok = candidate_remaining_bytes >= m_barrier_tail_min_remaining_bytes;
+		bool laggard_ok = second_remaining_bytes == 0 ||
+			static_cast<double>(candidate_remaining_bytes) >=
+				static_cast<double>(second_remaining_bytes) * m_barrier_tail_laggard_ratio;
+		should_boost =
+			progress_ratio >= m_barrier_tail_trigger_completed_ratio &&
+			remaining_ok &&
+			laggard_ok &&
+			candidate_remaining_bytes > 0;
+		completed_ratio = progress_ratio;
+	}
+
+	if (!should_boost){
+		if (it->second.has_boosted_src){
+			auto boosted_it = it->second.active_qps_by_src.find(it->second.boosted_src);
+			if (boosted_it != it->second.active_qps_by_src.end()){
+				for (auto &qp_ref : boosted_it->second){
+					if (qp_ref.owner != nullptr){
+						qp_ref.owner->SetBarrierTailPriority(qp_ref.qp, false);
+					}
+				}
+			}
+			it->second.has_boosted_src = false;
+		}
+		return;
+	}
+	if (m_debug_barrier_tail_prio){
+		printf("%lu barrier-tail-prio candidate node:%u group:%llu laggard-src:%u active-src:%zu completed-src:%zu total-src:%u progress-ratio:%.3f remaining:%llu second-remaining:%llu\n",
+			Simulator::Now().GetTimeStep(),
+			m_node->GetId(),
+			(unsigned long long)(groupKey >> 32),
+			candidate_src,
+			active_srcs,
+			completed_srcs,
+			total_seen_srcs,
+			completed_ratio,
+			(unsigned long long)candidate_remaining_bytes,
+			(unsigned long long)second_remaining_bytes);
+	}
+	auto candidate_it = it->second.active_qps_by_src.find(candidate_src);
+	if (candidate_it == it->second.active_qps_by_src.end()){
+		return;
+	}
+	if (it->second.has_boosted_src && it->second.boosted_src != candidate_src){
+		auto boosted_it = it->second.active_qps_by_src.find(it->second.boosted_src);
+		if (boosted_it != it->second.active_qps_by_src.end()){
+			for (auto &qp_ref : boosted_it->second){
+				if (qp_ref.owner != nullptr){
+					qp_ref.owner->SetBarrierTailPriority(qp_ref.qp, false);
+				}
+			}
+		}
+		it->second.has_boosted_src = false;
+	}
+	for (auto &qp_ref : candidate_it->second){
+		if (qp_ref.owner != nullptr){
+			qp_ref.owner->SetBarrierTailPriority(qp_ref.qp, true);
 		}
 	}
-	if (it->second.active_qps_by_src.size() == 1 && !it->second.completed_sources.empty()){
-		auto &remaining_qps = it->second.active_qps_by_src.begin()->second;
-		for (auto &qp : remaining_qps){
-			SetBarrierTailPriority(qp, true);
-		}
-	}
+	it->second.has_boosted_src = true;
+	it->second.boosted_src = candidate_src;
 }
 void RdmaHw::RegisterBarrierGroupQp(Ptr<RdmaQueuePair> qp){
 	if (qp == NULL || !m_enable_barrier_tail_prio || qp->GetGroupId() == std::numeric_limits<uint64_t>::max()){
 		return;
 	}
 	uint64_t group_key = GetBarrierGroupKey(qp->GetDest(), qp->GetGroupId());
-	auto &group_state = m_barrierTailGroups[group_key];
-	group_state.active_qps_by_src[qp->GetSrc()].push_back(qp);
+	auto &group_state = s_barrierTailGroups[group_key];
+	group_state.active_qps_by_src[qp->GetSrc()].push_back(BarrierTailQpRef(this, qp));
 	group_state.completed_sources.erase(qp->GetSrc());
+	group_state.source_initial_bytes[qp->GetSrc()] += qp->GetInitialSize();
+	group_state.max_sources_seen = std::max(
+		group_state.max_sources_seen,
+		static_cast<uint32_t>(
+			group_state.active_qps_by_src.size() + group_state.completed_sources.size()));
+	if (m_debug_barrier_tail_prio){
+		printf("%lu barrier-tail-prio register node:%u group:%llu src:%u dst:%u active-src:%zu src-qps:%zu completed-src:%zu\n",
+			Simulator::Now().GetTimeStep(),
+			m_node->GetId(),
+			(unsigned long long)qp->GetGroupId(),
+			qp->GetSrc(),
+			qp->GetDest(),
+			group_state.active_qps_by_src.size(),
+			group_state.active_qps_by_src[qp->GetSrc()].size(),
+			group_state.completed_sources.size());
+	}
 	RefreshBarrierTailPriority(group_key);
 }
 void RdmaHw::CompleteBarrierGroupQp(Ptr<RdmaQueuePair> qp){
@@ -356,8 +500,8 @@ void RdmaHw::CompleteBarrierGroupQp(Ptr<RdmaQueuePair> qp){
 		return;
 	}
 	uint64_t group_key = GetBarrierGroupKey(qp->GetDest(), qp->GetGroupId());
-	auto group_it = m_barrierTailGroups.find(group_key);
-	if (group_it == m_barrierTailGroups.end()){
+	auto group_it = s_barrierTailGroups.find(group_key);
+	if (group_it == s_barrierTailGroups.end()){
 		return;
 	}
 	auto src_it = group_it->second.active_qps_by_src.find(qp->GetSrc());
@@ -365,13 +509,34 @@ void RdmaHw::CompleteBarrierGroupQp(Ptr<RdmaQueuePair> qp){
 		return;
 	}
 	auto &src_qps = src_it->second;
-	src_qps.erase(std::remove(src_qps.begin(), src_qps.end(), qp), src_qps.end());
+	src_qps.erase(
+		std::remove_if(
+			src_qps.begin(),
+			src_qps.end(),
+			[&qp](const BarrierTailQpRef &ref){
+				return ref.qp == qp;
+			}),
+		src_qps.end());
+	if (m_debug_barrier_tail_prio){
+		printf("%lu barrier-tail-prio complete node:%u group:%llu src:%u dst:%u active-src:%zu src-qps-left:%zu completed-src:%zu\n",
+			Simulator::Now().GetTimeStep(),
+			m_node->GetId(),
+			(unsigned long long)qp->GetGroupId(),
+			qp->GetSrc(),
+			qp->GetDest(),
+			group_it->second.active_qps_by_src.size(),
+			src_qps.size(),
+			group_it->second.completed_sources.size());
+	}
 	if (src_qps.empty()){
 		group_it->second.active_qps_by_src.erase(src_it);
 		group_it->second.completed_sources.insert(qp->GetSrc());
+		if (group_it->second.has_boosted_src && group_it->second.boosted_src == qp->GetSrc()){
+			group_it->second.has_boosted_src = false;
+		}
 	}
 	if (group_it->second.active_qps_by_src.empty()){
-		m_barrierTailGroups.erase(group_it);
+		s_barrierTailGroups.erase(group_it);
 		return;
 	}
 	RefreshBarrierTailPriority(group_key);
@@ -440,7 +605,10 @@ void RdmaHw::DeleteQueuePair(Ptr<RdmaQueuePair> qp){
 }
 
 Ptr<RdmaRxQueuePair> RdmaHw::GetRxQp(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint16_t pg, bool create){
-    uint64_t key = ((uint64_t)dip << 32) | ((uint64_t)pg << 16) | (uint64_t)dport;
+    // Use a stable receive-side key based on sender identity and source port.
+    // Barrier-tail boosting may change the packet PG mid-flow; if PG is part of
+    // the key, the same logical flow gets split into multiple RxQp states.
+    uint64_t key = ((uint64_t)dip << 32) | (uint64_t)dport;
     #ifdef NS3_MTP
     MtpInterface::explicitCriticalSection cs;
     #endif
@@ -496,7 +664,7 @@ uint32_t RdmaHw::GetNicIdxOfRxQp(Ptr<RdmaRxQueuePair> q){
 	
 }
 void RdmaHw::DeleteRxQp(uint32_t dip, uint16_t pg, uint16_t dport){
-	uint64_t key = ((uint64_t)dip << 32) | ((uint64_t)pg << 16) | (uint64_t)dport;
+	uint64_t key = ((uint64_t)dip << 32) | (uint64_t)dport;
 	m_rxQpMap.erase(key);
 }
 
@@ -515,6 +683,7 @@ int RdmaHw::SendPacketComplete(Ptr<Packet> p, CustomHeader &ch)
 	uint32_t nic_idx = GetNicIdxOfQp(qp);
 	Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
 	SendComplete(qp);
+	return 0;
 }
 
 void RdmaHw::SendComplete(Ptr<RdmaQueuePair> qp)

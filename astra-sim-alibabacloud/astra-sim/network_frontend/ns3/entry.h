@@ -29,6 +29,7 @@
 #include "ns3/packet.h"
 #include "ns3/point-to-point-helper.h"
 #include "ns3/qbb-helper.h"
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <ns3/rdma-client-helper.h>
@@ -38,6 +39,22 @@
 #include <ns3/sim-setting.h>
 #include <ns3/switch-node.h>
 #include <time.h>
+
+inline int GetQpsPerConnection() {
+  static int qps_per_connection = -1;
+  if (qps_per_connection != -1) {
+    return qps_per_connection;
+  }
+  qps_per_connection = _QPS_PER_CONNECTION_;
+  const char* qps_env = std::getenv("SIMAI_QPS_PER_CONNECTION");
+  if (qps_env != nullptr) {
+    long parsed_qps = std::strtol(qps_env, nullptr, 10);
+    if (parsed_qps > 0) {
+      qps_per_connection = static_cast<int>(parsed_qps);
+    }
+  }
+  return qps_per_connection;
+}
 #include <unordered_map>
 #include <mutex>
 #include <vector>
@@ -72,6 +89,20 @@ map<std::pair<int,std::pair<int,int>>,int> waiting_to_sent_callback;
 map<std::pair<int,std::pair<int,int>>,int>waiting_to_notify_receiver;
 map<std::pair<int,std::pair<int,int>>,uint64_t>received_chunksize;  
 map<std::pair<int,std::pair<int,int>>,uint64_t>sent_chunksize;  
+map<std::tuple<uint64_t,int,int>,int> logical_group_expected_senders;
+map<std::tuple<uint64_t,int,int>,int> logical_group_finished_senders;
+map<std::tuple<uint64_t,int,int>,uint64_t> logical_group_received_bytes;
+
+uint64_t get_logical_group_id(const AstraSim::ncclFlowTag &flowTag){
+  if (flowTag.logical_group_id >= 0){
+    return static_cast<uint64_t>(flowTag.logical_group_id);
+  }
+  if (flowTag.current_flow_id >= 0){
+    return static_cast<uint64_t>(flowTag.current_flow_id);
+  }
+  return static_cast<uint64_t>(flowTag.tag_id);
+}
+
 bool is_sending_finished(int src,int dst,AstraSim::ncclFlowTag flowTag){
   int tag_id = flowTag.current_flow_id;
   if (waiting_to_sent_callback.count(
@@ -107,9 +138,23 @@ bool is_receive_finished(int src,int dst,AstraSim::ncclFlowTag flowTag){
 void SendFlow(int src, int dst, uint64_t maxPacketCount,
               void (*msg_handler)(void *fun_arg), void *fun_arg, int tag, AstraSim::sim_request *request) {
   MockNcclLog*NcclLog = MockNcclLog::getInstance();
-  uint64_t PacketCount=((maxPacketCount+_QPS_PER_CONNECTION_-1)/_QPS_PER_CONNECTION_);
+  int qps_per_connection = GetQpsPerConnection();
+  uint64_t PacketCount=((maxPacketCount+qps_per_connection-1)/qps_per_connection);
   uint64_t leftPacketCount = maxPacketCount;
-  for(int index = 0 ;index<_QPS_PER_CONNECTION_;index++){
+  uint64_t barrier_group_id = get_logical_group_id(request->flowTag);
+  {
+    #ifdef NS3_MTP
+    MtpInterface::explicitCriticalSection cs;
+    #endif
+    logical_group_expected_senders[std::make_tuple(
+        barrier_group_id,
+        dst,
+        request->flowTag.tag_id)]++;
+    #ifdef NS3_MTP
+    cs.ExitSection();
+    #endif
+  }
+  for(int index = 0 ;index<qps_per_connection;index++){
   uint64_t real_PacketCount = min(PacketCount,leftPacketCount);
   leftPacketCount-=real_PacketCount;
   uint32_t port = portNumber[src][dst]++; 
@@ -145,7 +190,7 @@ void SendFlow(int src, int dst, uint64_t maxPacketCount,
       pg, serverAddress[src], serverAddress[dst], port, dport, real_PacketCount,
       has_win ? (global_t == 1 ? maxBdp : pairBdp[n.Get(src)][n.Get(dst)]) : 0,
       global_t == 1 ? maxRtt : pairRtt[src][dst], msg_handler, fun_arg, tag,
-      src, dst, static_cast<uint64_t>(request->flowTag.current_flow_id));
+      src, dst, barrier_group_id);
   if(nvls_on) clientHelper.SetAttribute("NVLS_enable", UintegerValue (1));
   {
     #ifdef NS3_MTP
@@ -171,6 +216,27 @@ void notify_receiver_receive_data(int sender_node, int receiver_node,
     #endif                         
     MockNcclLog* NcclLog = MockNcclLog::getInstance();
     NcclLog->writeLog(NcclLogLevel::DEBUG," %d notify recevier:  %d message size:  %llu",sender_node,receiver_node,message_size);
+    uint64_t barrier_group_id = get_logical_group_id(flowTag);
+    std::tuple<uint64_t,int,int> group_key =
+        std::make_tuple(barrier_group_id, receiver_node, flowTag.tag_id);
+    logical_group_finished_senders[group_key]++;
+    logical_group_received_bytes[group_key] += message_size;
+    int finished_sender_count = logical_group_finished_senders[group_key];
+    int expected_sender_count = logical_group_expected_senders[group_key];
+    if (expected_sender_count > 0 && finished_sender_count == expected_sender_count){
+      printf(
+          "%lu incast-group-complete group:%llu tag:%d dst:%d finished_senders:%d total_bytes:%llu\n",
+          Simulator::Now().GetTimeStep(),
+          barrier_group_id,
+          flowTag.tag_id,
+          receiver_node,
+          finished_sender_count,
+          logical_group_received_bytes[group_key]);
+      fflush(stdout);
+      logical_group_finished_senders.erase(group_key);
+      logical_group_expected_senders.erase(group_key);
+      logical_group_received_bytes.erase(group_key);
+    }
     int tag = flowTag.tag_id;   
     if (expeRecvHash.find(make_pair(
             tag, make_pair(sender_node, receiver_node))) != expeRecvHash.end()) {

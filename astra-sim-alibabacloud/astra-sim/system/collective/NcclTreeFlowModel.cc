@@ -577,6 +577,7 @@ bool NcclTreeFlowModel::ready(int channel_id, int flow_id) {
   snd_req.flowTag.current_flow_id = flow_id;
   snd_req.flowTag.chunk_id = flow_model.chunk_id;
   snd_req.flowTag.child_flow_id = -1;
+  snd_req.flowTag.logical_group_id = flow_model.logical_group_id;
   snd_req.flowTag.tree_flow_list =
       this->_flow_models[std::make_pair(channel_id, flow_id)].child_flow_id;
   snd_req.flowTag.sender_node = id;
@@ -709,6 +710,7 @@ bool NcclTreeFlowModel::phy_ready(int channel_id,int flow_id) {
   snd_req.flowTag.current_flow_id = flow_id;
   snd_req.flowTag.chunk_id = flow_model.chunk_id;
   snd_req.flowTag.child_flow_id = -1;
+  snd_req.flowTag.logical_group_id = flow_model.logical_group_id;
   snd_req.flowTag.tree_flow_list =
       this->_flow_models[std::make_pair(channel_id, flow_id)].child_flow_id;
   snd_req.flowTag.sender_node = id;
