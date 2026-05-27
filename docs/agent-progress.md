@@ -5969,3 +5969,56 @@ Enabling Shared Folders with Fusion on a Apple host
 ### Next queued action
 
 - Build/choose a contention-amplified workload (while preserving fan-in trigger validity) and rerun cap-only vs cap-plus-prio to seek first positive delta on completion/progress metrics.
+
+## 2026-05-27 17:31 CST
+
+- Continued mainline toward user’s two acceptance criteria:
+  1) trigger is correct
+  2) trigger has benefit
+
+### Work completed this cycle
+
+- Added contention-oriented workloads:
+  - `/Users/weiye/Documents/moe/example/microAllReduce8MicroBurst.txt`
+  - `/Users/weiye/Documents/moe/example/dataAllReduce8WgBurst.txt`
+- Added no-window config variant:
+  - `/Users/weiye/Documents/moe/astra-sim-alibabacloud/inputs/config/SimAI.vm.nowin.conf` (`HAS_WIN=0`)
+
+### VM authoritative runs executed
+
+1. `microAllReduce8MicroBurst` (`SIMAI_NUM_PASSES=64`, timeout 180s)
+   - run dir: `results/barrier-tail-retain-20260527-090125`
+   - both branches exited `139` before useful traffic traces.
+   - classification: unstable path (not used for benefit decision).
+
+2. `dataAllReduce8WgBurst` (`SIMAI_NUM_PASSES=8`, timeout 180s)
+   - run dir: `results/barrier-tail-retain-20260527-090839`
+   - cap-only:
+     - `trigger_events=0`
+     - `sendflow_lines=5376`, `max_send_tick=10150395`
+   - cap-plus-prio:
+     - `trigger_events=1664`
+     - `local_competing_sendable max=7`
+     - `sendflow_lines=4992`, `max_send_tick=9398519`
+
+3. Same workload with no-win config (`SimAI.vm.nowin.conf`, `HAS_WIN=0`)
+   - run dir: `results/barrier-tail-retain-20260527-092146`
+   - cap-only:
+     - `trigger_events=0`
+     - `sendflow_lines=5376`, `max_send_tick=10150395`
+   - cap-plus-prio:
+     - `trigger_events=1728`
+     - `local_competing_sendable max=7`
+     - `sendflow_lines=5184`, `max_send_tick=9774457`
+
+### Decision state after this cycle
+
+- Criterion (1) trigger correctness: satisfied repeatedly.
+- Criterion (2) benefit: not satisfied yet.
+  - First successful emergence of local contention (`local_competing_sendable>0`) was achieved.
+  - Under current timeout-capped comparison, cap-plus-prio has not shown a clear positive progress/completion advantage.
+
+### Next queued mainline step
+
+- Run replicated paired matrix on `dataAllReduce8WgBurst` (N>=3) under fixed envelope; compare milestone ticks and completion markers.
+- If trend remains non-positive, perform controlled parameter sweep of trigger gate (`ACTIVE_SRC_THRESHOLD`, `MIN_BYTES_LEFT`) before any deeper mechanism code changes.

@@ -7124,3 +7124,60 @@ Enabling Shared Folders with Fusion on a Apple host
 
 - Keep current case as trigger-correctness anchor.
 - Move benefit experiments to a contention-amplified workload where local NIC competition can exist (current repeated evidence: `local_competing_sendable max=0` and `switch_enqueue_events=0`), otherwise priority promotion cannot translate into speedup.
+
+## Run Update: 2026-05-27 17:31 CST (contention breakthrough + benefit check)
+
+- Continued on the two required goals:
+  1) trigger correctness
+  2) trigger benefit under real contention
+
+### What was attempted
+
+1. `MICRO` burst path trial
+   - Added workload: `example/microAllReduce8MicroBurst.txt`.
+   - VM result: deterministic early crash (`case_exit_code=139`) before useful send traces.
+   - Conclusion: current `MICRO` path is unstable in this tree and not suitable as benefit benchmark now.
+
+2. Switched to `DATA` non-blocking WG burst path to force concurrent local sendables
+   - Added workload: `example/dataAllReduce8WgBurst.txt` (8 layers, WG `ALLREDUCE 1GiB`).
+   - Paired runs (`cap_only` vs `cap_plus_prio`) with `180s` timeout:
+     - run dir: `results/barrier-tail-retain-20260527-090839`
+   - Repeated with no-win config (`HAS_WIN=0`) for stronger opportunity:
+     - config: `astra-sim-alibabacloud/inputs/config/SimAI.vm.nowin.conf`
+     - run dir: `results/barrier-tail-retain-20260527-092146`
+
+### Key evidence collected
+
+- Trigger correctness remains valid:
+  - `cap_only`: `trigger_events=0`, `barrier_tail_prio_enable=0`
+  - `cap_plus_prio`: large trigger counts (`1664` / `1728`) and enable events match.
+
+- Contention finally appears (breakthrough):
+  - `cap_plus_prio` now shows
+    - `local_select_events` in millions
+    - `local_competing_sendable: count=... min=0 max=7`
+  - This is the first stable evidence in this thread that same-NIC concurrent sendable flows exist.
+
+- Progress comparison at same wall-clock cap:
+  - In `20260527-090839`:
+    - `cap_only` send lines: `5376`, max send tick: `10150395`
+    - `cap_plus_prio` send lines: `4992`, max send tick: `9398519`
+  - In `20260527-092146` (`HAS_WIN=0`):
+    - `cap_only` send lines: `5376`, max send tick: `10150395`
+    - `cap_plus_prio` send lines: `5184`, max send tick: `9774457`
+  - At shared milestones (e.g., up to 3328 sends), tick positions align; divergence appears in tail volume under timeout.
+
+### Interpretation (current)
+
+- Goal (1) trigger correctness: **confirmed** under both baseline and contention-amplified cases.
+- Goal (2) trigger benefit: **not yet confirmed**.
+  - We now have local contention, but under fixed timeout window the cap-plus-prio branch does not yet show a clear positive completion/progress advantage; current samples even show less tail send volume before timeout.
+  - This suggests either promotion policy side-effects in this envelope or an unsuitable metric window (timeout truncation bias).
+
+### Next action queued
+
+- Run short replicated matrix on `dataAllReduce8WgBurst` (N>=3 per branch) with same deterministic envelope and compare:
+  - identical milestone ticks (e.g., 3072/3328/3456 sends),
+  - branch-wise completion markers if reachable,
+  - and contention histograms.
+- If negative trend persists, isolate whether policy itself causes slowdown by sweeping `SIMAI_BARRIER_TAIL_ACTIVE_SRC_THRESHOLD` and `SIMAI_BARRIER_TAIL_MIN_BYTES_LEFT` under the same workload.
