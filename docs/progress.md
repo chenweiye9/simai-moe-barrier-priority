@@ -7333,3 +7333,48 @@ Enabling Shared Folders with Fusion on a Apple host
   - neutral boundary: `8` layers × `1GiB`, `th=1`, `min=0`
   - negative boundary: `4` layers × `1GiB`, `th=1`, `min=0`
 - If sign remains stable after repeats, move to instrumentation around local-select fairness/rotation impact to explain why contention trigger does not convert into throughput gain.
+
+## Run Update: 2026-05-28 00:25 CST (why "shouldn't be negative" still appears negative)
+
+- Investigated the discrepancy between expected non-negative behavior and observed negative deltas.
+- Two concrete root causes are now visible.
+
+### 1) Measurement artifact from asymmetric diagnostics (confirmed)
+
+- Current runner (`scripts/run-barrier-tail-retain-diag.sh`) forces `SIMAI_BARRIER_TAIL_DIAG=1` for both branches.
+- In practice, this creates **asymmetric log volume**:
+  - cap-only prints little.
+  - cap-plus-prio prints massive `barrier-tail-diag local-select ...` lines when trigger is active.
+- Controlled check on `dataAllReduce4WgBurst`, `th=1,min=0`, `180s`:
+  - `diag_on_cap_only`: `sendflow_lines=5952`, stdout ~`2,146` bytes
+  - `diag_on_cap_plus`: `sendflow_lines=5568`, stdout ~`403,505,890` bytes
+- This means wall-clock-capped comparisons are biased: cap-plus-prio spends much more host time printing logs and reaches fewer simulation events in the same 180s.
+
+### 2) Mechanism-side coupling that can still hurt fairness (likely)
+
+- Scheduler does a tail-first pass before normal RR (`qbb-net-device.cc`: lines 154-201).
+- Once `tail_critical` is set, those QPs are considered first every dequeue cycle.
+- `RefreshBarrierTailPriority` currently flips tail flags by:
+  - clear all tracked (`SetBarrierTailPriority(false)`), then
+  - re-enable boost set (`SetBarrierTailPriority(true)`),
+  which may add extra churn at packet-granularity under contention.
+- Even with PG unchanged, this ordering bias can reduce aggregate progress for non-tail flows in timeout-window metrics.
+
+### Additional controlled check (diag off path)
+
+- Manual runs without `SIMAI_BARRIER_TAIL_DIAG` on `dataAllReduce4WgBurst`, `th=1,min=0`:
+  - retain `0`: cap-only `5760` vs cap-plus `5376` (still negative)
+  - retain `65536`: cap-only `5952` vs cap-plus `5760` (negative but smaller gap)
+- Interpretation:
+  - Large part of previous negative trend is indeed amplified by diagnostics overhead.
+  - But a residual mechanism-side negative remains in this workload/window and needs fairness-level instrumentation to explain fully.
+
+### Immediate correction to evaluation method
+
+- For benefit judgment, stop using heavy `SIMAI_BARRIER_TAIL_DIAG=1` in paired comparisons.
+- Keep diagnostics only for sparse spot-checks; use diag-off runs for primary throughput/progress deltas.
+
+### Next queued action
+
+- Add a lightweight runner mode to disable barrier-tail verbose logs during paired benchmarks.
+- Then rerun boundary workloads (`4-layer` negative, `8-layer` neutral) with N>=3 under diag-off to separate true mechanism effect from log artifact.

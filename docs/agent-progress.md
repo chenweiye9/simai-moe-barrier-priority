@@ -6154,3 +6154,41 @@ Observation:
   - neutral boundary (`8` layers, `1GiB`, `th=1,min=0`)
   - negative boundary (`4` layers, `1GiB`, `th=1,min=0`)
 - If signs hold, proceed to fairness/rotation instrumentation to explain non-conversion from trigger/competition to throughput gain.
+
+## 2026-05-28 00:25 CST
+
+- Analyzed why observed regressions contradict the "should be non-negative" intuition.
+
+### Key finding A: wall-clock bias from asymmetric diagnostics
+
+- Existing diagnostic runner enables `SIMAI_BARRIER_TAIL_DIAG=1` for both branches.
+- With trigger active, cap-plus-prio emits massive per-select logs; cap-only does not.
+- Controlled check (`dataAllReduce4WgBurst`, `th=1`, `min=0`, 180s):
+  - cap-only stdout size: ~2 KB
+  - cap-plus-prio stdout size: ~403 MB
+- Therefore, 180s timeout comparisons are biased against cap-plus-prio due to host-side logging overhead.
+
+### Key finding B: mechanism can still create residual negative under same wall-clock
+
+- Tail-first scheduling path in `RdmaEgressQueue::GetNextQindex` prefers `tail_critical` QPs before normal RR.
+- `RefreshBarrierTailPriority` toggles flags via disable-all then enable-boost sequence.
+- This can skew service order and introduce fairness churn under contention, even without PG change.
+
+### Controlled diag-off sanity run (same workload)
+
+- `dataAllReduce4WgBurst`, `th=1`, `min=0`, diag off:
+  - retain=0: cap-only 5760 vs cap-plus 5376 (negative)
+  - retain=65536: cap-only 5952 vs cap-plus 5760 (negative, smaller)
+- Conclusion:
+  - diagnostics overhead explains a major portion of prior negative magnitude;
+  - a residual mechanism-side negative still exists in this envelope.
+
+### Decision
+
+- Future benefit judgments should use diag-off paired runs as primary evidence.
+- Barrier-tail verbose diagnostics should be reserved for sparse root-cause spot checks only.
+
+### Next queued action
+
+- Add/enable a quiet benchmark mode (no `SIMAI_BARRIER_TAIL_DIAG`) for paired comparisons.
+- Re-run boundary workloads with N>=3 under quiet mode, then decide whether mechanism logic needs fairness-focused adjustment.
