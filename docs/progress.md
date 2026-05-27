@@ -7002,3 +7002,53 @@ Enabling Shared Folders with Fusion on a Apple host
 ### Next smallest discriminating action
 
 - Keep all knobs fixed and run one paired 121s vs 120s artifact diff focused on first occurrence timestamps of `simai-barrier-tail enable` and corresponding `simai-workload-state` counters to explain why the boundary crosses exactly at +1s horizon.
+
+## Run Correction Update: 2026-05-27 14:27-15:00 CST
+
+- Continued the planned `120s vs 121s` deep artifact diff and executed additional controlled reruns to validate boundary stability.
+
+### What was verified
+
+1. Re-opened prior comparison artifacts:
+   - `results/barrier-tail-retain-20260527-053451` (`120s`, historical no-trigger sample available before cleanup)
+   - `results/barrier-tail-retain-20260527-062229` (`121s`, trigger sample)
+
+2. Extracted direct timing evidence from `cap_plus_prio.stdout.log`:
+   - In `20260527-062229`, first trigger appears at tick `298002`.
+   - In `20260527-053451`, last parsed tick is `294879` and no trigger line appears.
+   - gap to first observed trigger tick from that no-trigger endpoint: `~3123` simulation ticks.
+
+3. Crucial revalidation runs at **same 120s timeout** on current environment:
+   - `results/barrier-tail-retain-20260527-064533` (`120s`, lighter diagnostic envelope):
+     - `trigger_events=4096`, `barrier_tail_prio_enable=4096`, first trigger tick `297998`.
+   - `results/barrier-tail-retain-20260527-065516` (`120s`, heavy diagnostic envelope enabled):
+     - `trigger_events=4096`, `barrier_tail_prio_enable=4096`, first trigger tick `297988`.
+
+4. Side reference sample:
+   - `results/barrier-tail-retain-20260527-062229` (`121s`) had `trigger_events=3072`, first trigger tick `298002`.
+
+### Corrected interpretation
+
+- Previous statement “`120s` no-trigger and `>=121s` trigger” is **not a strict deterministic threshold**.
+- Updated interpretation:
+  - first trigger onset is around simulation tick `~298k` in this envelope;
+  - whether a wall-clock-capped run captures it depends on runtime progress rate/logging overhead/noise at that attempt.
+- Therefore, `120s` can be either trigger or no-trigger depending on effective simulation advancement before timeout.
+
+### Invariant still holds
+
+- Even when trigger appears strongly (`3072/4096` events), observed local/switch competition signatures remain absent:
+  - `local_competing_sendable max=0`
+  - `switch_enqueue_events=0`
+- So mechanism activation still does not imply demonstrated queue-level advantage in this setup.
+
+### Next smallest discriminating action (updated)
+
+- Replace single-shot threshold inference with a repeatability matrix at fixed envelope:
+  - `120s` with reduced logs (repeat N>=3)
+  - `120s` with heavy logs (repeat N>=3)
+- Record per-run:
+  - last simulation tick reached
+  - first trigger tick (if any)
+  - trigger count
+- Use this to model trigger-hit probability vs achieved tick, then choose timeout/diagnostic policy for fair cap-only vs cap+prio benefit comparison.

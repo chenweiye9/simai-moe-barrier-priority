@@ -5913,3 +5913,31 @@ Enabling Shared Folders with Fusion on a Apple host
 ### Immediate next action queued
 
 - Perform paired `120s` vs `121s` deep artifact diff (first tail-enable timestamp vs workload-state progression) to explain why +1s horizon crosses the trigger boundary.
+
+## 2026-05-27 15:00 CST
+
+- Executed requested `120s vs 121s` deep artifact diff and extended validation to resolve boundary ambiguity.
+
+### Findings
+
+- Historical no-trigger sample (`120s`, run `20260527-053451`) ended around tick `294879` with no trigger lines.
+- Trigger sample (`121s`, run `20260527-062229`) first trigger tick is `298002` and total trigger events `3072`.
+- New `120s` reruns in current environment both triggered:
+  - `20260527-064533` (`120s`, lighter diag): `trigger_events=4096`, first trigger tick `297998`.
+  - `20260527-065516` (`120s`, heavy diag): `trigger_events=4096`, first trigger tick `297988`.
+
+### Correction to prior claim
+
+- Prior hard boundary claim (`120s` no-trigger vs `>=121s` trigger) is invalid.
+- Better model: trigger onset is near simulation tick ~`298k`; timeout-capped runs may or may not hit that point depending on runtime progress.
+
+### Persisting mechanism caveat
+
+- Trigger presence still coincides with:
+  - `local_competing_sendable max=0`
+  - `switch_enqueue_events=0`
+- So queue-level benefit remains unproven despite trigger activation.
+
+### Next action queued
+
+- Run repeatability matrix (`120s` light logs and `120s` heavy logs, each N>=3), store per-run `last_tick`, `first_trigger_tick`, and `trigger_count`, then base subsequent benefit experiments on reached-tick-normalized windows rather than raw wall-clock seconds.
