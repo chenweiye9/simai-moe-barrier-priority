@@ -5941,3 +5941,31 @@ Enabling Shared Folders with Fusion on a Apple host
 ### Next action queued
 
 - Run repeatability matrix (`120s` light logs and `120s` heavy logs, each N>=3), store per-run `last_tick`, `first_trigger_tick`, and `trigger_count`, then base subsequent benefit experiments on reached-tick-normalized windows rather than raw wall-clock seconds.
+
+## 2026-05-27 16:17 CST
+
+- Stayed on the two required goals only.
+
+### 1) Trigger correctness
+
+- `microAllReduce8Stable` consistently shows correct branch behavior:
+  - cap-only: no trigger, no prio enable.
+  - cap-plus-prio: trigger/enable events present and repeatable (`168`).
+
+### 2) Trigger benefit
+
+- Direct completion timestamps (`pass_finished` / `all_passes_finished`) still unavailable in this capture window.
+- Used `SimAI.log` send-tick progression as interim same-window benefit metric.
+- Across five repeated runs, cap-only and cap-plus-prio have identical progression envelope (`min_send_tick=556010`, `max_send_tick=1503239`, `sendflow_lines=168`).
+- Interim conclusion: trigger is real but no measurable throughput/progress benefit in current workload regime.
+
+### Interpretation
+
+- This aligns with persistent diagnostics:
+  - `local_competing_sendable max=0`
+  - `switch_enqueue_events=0`
+- Without local/switch contention, priority promotion has no bottleneck leverage to convert into speedup.
+
+### Next queued action
+
+- Build/choose a contention-amplified workload (while preserving fan-in trigger validity) and rerun cap-only vs cap-plus-prio to seek first positive delta on completion/progress metrics.

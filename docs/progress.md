@@ -7052,3 +7052,75 @@ Enabling Shared Folders with Fusion on a Apple host
   - first trigger tick (if any)
   - trigger count
 - Use this to model trigger-hit probability vs achieved tick, then choose timeout/diagnostic policy for fair cap-only vs cap+prio benefit comparison.
+
+## Run Update: 2026-05-27 16:12 CST (Two-goal pipeline)
+
+- Continued strictly on two goals:
+  1) trigger correctness
+  2) trigger benefit
+
+### Track A: trigger correctness (stable evidence)
+
+- Re-ran controlled allreduce cases that consistently produce fan-in and mechanism activation.
+- `microAllReduce8Stable` (`Spectrum-X_8g_8gps_400Gbps_H100`, retain=65536, threshold=8):
+  - run dirs: `20260527-075529`, `20260527-075741`, `20260527-075930`, `20260527-080423`, `20260527-080916`
+  - repeated pattern:
+    - `cap_only`: `barrier_tail_prio_enable=0`, `trigger_events=0`
+    - `cap_plus_prio`: `barrier_tail_prio_enable=168`, `trigger_events=168`
+  - confirms mechanism triggers in the intended branch and stays off in baseline.
+
+### Track B: benefit measurement (current blocker and actions)
+
+- Immediate blocker: existing summary metrics (`pass_finished`, `all_passes_finished`) remain `none` in these windows, so direct completion-time deltas are unavailable from current capture envelope.
+- Additional diagnosis found an interpretation pitfall:
+  - previous quick inference from stdout tick fields under-read `cap_only` progress;
+  - both branches are advancing large send ticks in `SimAI.log` (same order), so no evidence yet that cap-plus-prio is faster by completion criteria.
+- Script fix landed locally:
+  - `/Users/weiye/Documents/moe/scripts/analyze-barrier-fanin.py`
+  - now emits `max_send_tick` from `SimAI.log` for both flow-key and fallback sendflow paths.
+
+### Tiny-case attempt and rollback
+
+- Created tiny workload to force completion:
+  - local: `/Users/weiye/Documents/moe/example/microAllReduce8OneTiny.txt`
+  - synced to VM: `/home/weiye/simai-moe-barrier-priority-main/example/microAllReduce8OneTiny.txt`
+- Result:
+  - this tiny case either failed when unsynced (`case_exit_code=1` initially) or ran but did not trigger mechanism (`cap_plus_prio trigger_events=0`) after sync.
+- Decision:
+  - tiny case is too small to preserve mechanism regime; it is not suitable for proving benefit of this priority feature.
+
+### Updated immediate next action
+
+- Keep `microAllReduce8Stable` as trigger-correctness anchor.
+- Build a medium completion-oriented workload (still with fan-in) and run paired cap-only/cap-plus-prio with enough window to force `pass_finished` visibility.
+- Compare benefit only on completion-aligned metrics (first `pass_finished` and/or `all_passes_finished` timestamps), not on trigger counts alone.
+
+## Run Result: 2026-05-27 16:17 CST (Two-goal checkpoint)
+
+### Goal 1: trigger correctness
+
+- Confirmed repeatedly on `microAllReduce8Stable` (`8g` topology, retain=65536, threshold=8):
+  - `cap_only`: `trigger_events=0`, `barrier_tail_prio_enable=0`
+  - `cap_plus_prio`: `trigger_events=168`, `barrier_tail_prio_enable=168`
+- Fan-in remained valid (`tag_id max_fanin=8`, groups with fan-in > 1 present).
+- Conclusion: trigger gating and control path are functioning as designed in this controlled case.
+
+### Goal 2: trigger benefit
+
+- Completion-time metrics are still unavailable in this envelope (`pass_finished/all_passes_finished` remain `none` before timeout summaries).
+- To avoid metric blind spots, extracted progress directly from `SimAI.log` across multiple repeated runs.
+- Repeated runs checked: `20260527-075529`, `20260527-075741`, `20260527-075930`, `20260527-080423`, `20260527-081652`.
+- For each run, both branches showed identical progression bounds:
+  - `min_send_tick=556010`
+  - `max_send_tick=1503239`
+  - `sendflow_lines=168`
+- Thus, under this workload and window, **trigger occurs but no measurable progress-speedup signal appears**.
+
+### Additional notes
+
+- Tiny workload attempt (`microAllReduce8OneTiny`) was synchronized to VM and executes, but is too small to sustain mechanism regime reliably (including a run with zero trigger), so it is not suitable as benefit benchmark.
+
+### Updated next action
+
+- Keep current case as trigger-correctness anchor.
+- Move benefit experiments to a contention-amplified workload where local NIC competition can exist (current repeated evidence: `local_competing_sendable max=0` and `switch_enqueue_events=0`), otherwise priority promotion cannot translate into speedup.
