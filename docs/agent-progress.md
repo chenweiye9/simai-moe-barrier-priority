@@ -6022,3 +6022,88 @@ Enabling Shared Folders with Fusion on a Apple host
 
 - Run replicated paired matrix on `dataAllReduce8WgBurst` (N>=3) under fixed envelope; compare milestone ticks and completion markers.
 - If trend remains non-positive, perform controlled parameter sweep of trigger gate (`ACTIVE_SRC_THRESHOLD`, `MIN_BYTES_LEFT`) before any deeper mechanism code changes.
+
+## 2026-05-27 19:15 CST
+
+- Completed replicated paired matrix (N>=3 additional) for contention benchmark.
+
+### Runs added this cycle (VM authoritative)
+
+- `results/barrier-tail-retain-20260527-105141`
+- `results/barrier-tail-retain-20260527-105850`
+- `results/barrier-tail-retain-20260527-110559`
+
+(plus prior same workload reference `20260527-090839` for aggregation)
+
+### Stable outcomes across replicated runs
+
+1. Trigger correctness
+- cap-only: always no trigger (`trigger_events=0`).
+- cap-plus-prio: always triggers (`1664~1792` events).
+
+2. Contention establishment
+- cap-plus-prio: `local_competing_sendable max=7` in all runs.
+- `competing_sendable>0` ratio stays ~99.986% over millions of local-select events.
+
+3. Benefit signal (current)
+- Up to shared send milestones, tick positions are identical.
+- Near timeout tail, cap-only repeatedly sends more events than cap-plus-prio:
+  - e.g. `3840/3968` vs `3584` sends.
+- `pass:0 finished at time:45` stays equal.
+
+### Status
+
+- Criterion (1): satisfied.
+- Criterion (2): not satisfied under current envelope/workload/settings; trend appears non-positive.
+
+### Queued next step
+
+- Run controlled gate-parameter sweep on same workload:
+  - `ACTIVE_SRC_THRESHOLD`
+  - `MIN_BYTES_LEFT`
+- objective: determine whether a narrower trigger window can turn tail progression from non-positive to positive.
+
+## 2026-05-27 20:55 CST
+
+- Completed the queued gate sweep on the contention benchmark without changing mechanism code.
+
+### Fixed experiment envelope
+
+- workload: `./example/dataAllReduce8WgBurst.txt`
+- topology/config: `./Spectrum-X_8g_8gps_400Gbps_H100` + `astra-sim-alibabacloud/inputs/config/SimAI.vm.conf`
+- timeout: `SIMAI_CASE_TIMEOUT_SEC_CAP_ONLY=180`, `SIMAI_CASE_TIMEOUT_SEC_CAP_PLUS_PRIO=180`
+- fixed knobs: `SIMAI_BARRIER_TAIL_RETAIN_INFLIGHT_BYTES=65536`, `SIMAI_BARRIER_TAIL_REQUIRE_COMPLETED_SOURCE=0`, `SIMAI_NUM_PASSES=8`
+- compared metric in this window: `sendflow_lines` (cap-plus-prio minus cap-only)
+
+### Sweep A (`ACTIVE_SRC_THRESHOLD`, with `MIN_BYTES_LEFT=16777216`)
+
+- `20260527-111631` (`th=1`): `5760 -> 5760` (`delta=0`), trigger `1920`
+- `20260527-112332` (`th=2`): `5952 -> 5376` (`delta=-576`), trigger `1792`
+- `20260527-113032` (`th=4`): `5952 -> 5568` (`delta=-384`), trigger `1856`
+- `20260527-113733` (`th=8`): `5760 -> 5184` (`delta=-576`), trigger `1728`
+
+Observation:
+- `th=1` avoids the consistent negative tail gap seen at `th>=2`.
+
+### Sweep B (`MIN_BYTES_LEFT`, fixed `ACTIVE_SRC_THRESHOLD=1`)
+
+- `20260527-114621` (`min=0`): `4992 -> 5376` (`delta=+384`), trigger `1792`
+- `20260527-115322` (`min=8MiB`): `5184 -> 4800` (`delta=-384`), trigger `1600`
+- `20260527-120022` (`min=16MiB`): `5184 -> 5184` (`delta=0`), trigger `1728`
+- `20260527-120723` (`min=32MiB`): `5568 -> 5568` (`delta=0`), trigger `0`
+
+Observation:
+- gate tightness strongly controls both activation and outcome sign.
+- `min=32MiB` effectively suppresses trigger in this window.
+
+### Decision state
+
+- Criterion (1) trigger correctness: still holds (cap-only no trigger; cap-plus-prio triggers when gate allows).
+- Criterion (2) trigger benefit: still not robustly satisfied; result remains parameter-sensitive and non-monotonic.
+
+### Next queued action
+
+- Run repeatability check (N>=3) for candidate positive point:
+  - `ACTIVE_SRC_THRESHOLD=1`
+  - `MIN_BYTES_LEFT=0`
+- If repeated runs fail to keep positive trend, stop widening matrix and pivot to deeper fairness/tail-churn instrumentation.

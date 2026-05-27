@@ -7181,3 +7181,99 @@ Enabling Shared Folders with Fusion on a Apple host
   - branch-wise completion markers if reachable,
   - and contention histograms.
 - If negative trend persists, isolate whether policy itself causes slowdown by sweeping `SIMAI_BARRIER_TAIL_ACTIVE_SRC_THRESHOLD` and `SIMAI_BARRIER_TAIL_MIN_BYTES_LEFT` under the same workload.
+
+## Run Update: 2026-05-27 19:15 CST (N>=3 replication on contention workload)
+
+- Continued strict mainline on the same contention-oriented benchmark:
+  - workload: `./example/dataAllReduce8WgBurst.txt`
+  - config: `astra-sim-alibabacloud/inputs/config/SimAI.vm.conf`
+  - timeout envelope: cap-only/cap-plus-prio both `180s`
+  - repeated run dirs:
+    - `20260527-090839` (existing baseline from prior cycle)
+    - `20260527-105141`
+    - `20260527-105850`
+    - `20260527-110559`
+
+### Replicated observations
+
+1. Trigger correctness remains stable
+
+- In all repeated runs:
+  - cap-only: `trigger_events=0`
+  - cap-plus-prio: trigger enabled and active
+    - `20260527-090839`: `trigger_events=1664`
+    - `20260527-105141`: `trigger_events=1792`
+    - `20260527-105850`: `trigger_events=1792`
+    - `20260527-110559`: `trigger_events=1792`
+
+2. Contention signal is stable and strong (not a one-off)
+
+- cap-plus-prio local-select diagnostics:
+  - `local_competing_sendable max=7` in all repeated runs.
+  - `competing_sendable>0` ratio ~`99.986%` (millions of local-select events each run).
+- This confirms contention has been truly established and sustained.
+
+3. Benefit check under identical timeout envelope (current conclusion)
+
+- Milestone parity up to 3584 sends:
+  - send milestone ticks (`3072/3328/3456/3584`) are identical between branches when both milestones are reached.
+- Tail progression divergence at timeout:
+  - cap-only reaches higher tail send volume before timeout.
+  - examples:
+    - `20260527-105141`: cap-only `3840` sends (`max_tick=10902292`) vs cap-plus-prio `3584` (`max_tick=10150395`)
+    - `20260527-105850`: same pattern
+    - `20260527-110559`: cap-only `3968` vs cap-plus-prio `3584`
+- `pass:0 finished at time:45` is equal across branches in all replicated runs.
+
+### Interim decision after replication
+
+- Goal (1) trigger correctness: **confirmed** with high confidence.
+- Goal (2) trigger has benefit: **not supported** by current replicated evidence in this window; observed trend is non-positive on tail send progress.
+
+### Next action queued
+
+- Start parameter sweep on promotion gate under same workload and envelope to test whether negative/neutral behavior is configuration-induced:
+  - `SIMAI_BARRIER_TAIL_ACTIVE_SRC_THRESHOLD` sweep
+  - `SIMAI_BARRIER_TAIL_MIN_BYTES_LEFT` sweep
+- Keep all other settings fixed to preserve comparability.
+
+## Run Update: 2026-05-27 20:55 CST (gate sweep completed on contention case)
+
+- Completed the queued gate-parameter sweep on the same contention benchmark envelope:
+  - workload: `./example/dataAllReduce8WgBurst.txt`
+  - topology/config: `./Spectrum-X_8g_8gps_400Gbps_H100` + `astra-sim-alibabacloud/inputs/config/SimAI.vm.conf`
+  - timeout: cap-only/cap-plus-prio both `180s`
+  - fixed knobs: `SIMAI_BARRIER_TAIL_RETAIN_INFLIGHT_BYTES=65536`, `SIMAI_BARRIER_TAIL_REQUIRE_COMPLETED_SOURCE=0`, `SIMAI_NUM_PASSES=8`
+
+### Sweep A: `SIMAI_BARRIER_TAIL_ACTIVE_SRC_THRESHOLD` (with `MIN_BYTES_LEFT=16777216`)
+
+- run dirs and outcomes:
+  - `th=1` (`20260527-111631`): cap-only `5760` vs cap-plus-prio `5760` (`delta=0`), trigger `1920`
+  - `th=2` (`20260527-112332`): cap-only `5952` vs cap-plus-prio `5376` (`delta=-576`), trigger `1792`
+  - `th=4` (`20260527-113032`): cap-only `5952` vs cap-plus-prio `5568` (`delta=-384`), trigger `1856`
+  - `th=8` (`20260527-113733`): cap-only `5760` vs cap-plus-prio `5184` (`delta=-576`), trigger `1728`
+- interpretation:
+  - tighter gate (`th=1`) removed the previously consistent negative tail gap.
+  - larger thresholds (`>=2`) remained non-positive in this envelope.
+
+### Sweep B: `SIMAI_BARRIER_TAIL_MIN_BYTES_LEFT` (fixed `ACTIVE_SRC_THRESHOLD=1`)
+
+- run dirs and outcomes:
+  - `min=0` (`20260527-114621`): cap-only `4992` vs cap-plus-prio `5376` (`delta=+384`), trigger `1792`
+  - `min=8MiB` (`20260527-115322`): cap-only `5184` vs cap-plus-prio `4800` (`delta=-384`), trigger `1600`
+  - `min=16MiB` (`20260527-120022`): cap-only `5184` vs cap-plus-prio `5184` (`delta=0`), trigger `1728`
+  - `min=32MiB` (`20260527-120723`): cap-only `5568` vs cap-plus-prio `5568` (`delta=0`), trigger `0` (gate never opened)
+- interpretation:
+  - benefit is highly gate-sensitive under contention; there is no stable positive region yet.
+  - overly strict bytes gate (`32MiB`) effectively disables the mechanism in this workload window.
+
+### Status after full gate sweep
+
+- Criterion (1) trigger correctness: still satisfied whenever gate conditions are met (cap-only always `0`, cap-plus-prio follows gate).
+- Criterion (2) trigger benefit: not yet established as robust; currently parameter-sensitive with mixed sign across runs.
+
+### Next queued action
+
+- Promote one candidate point for repeatability validation (N>=3) before code changes:
+  - primary candidate: `ACTIVE_SRC_THRESHOLD=1`, `MIN_BYTES_LEFT=0` (first observed positive delta).
+- If positive trend does not hold under repeats, freeze mechanism knobs and move to instrumentation-level root cause on local-select fairness/tail churn rather than expanding workload matrix further.
