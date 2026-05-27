@@ -6192,3 +6192,40 @@ Observation:
 
 - Add/enable a quiet benchmark mode (no `SIMAI_BARRIER_TAIL_DIAG`) for paired comparisons.
 - Re-run boundary workloads with N>=3 under quiet mode, then decide whether mechanism logic needs fairness-focused adjustment.
+
+## 2026-05-28 01:05 CST
+
+- Ran quiet-mode N=3 repeats (diag-off) for boundary workloads to test sign stability without heavy logging bias.
+
+### Setup
+
+- `SIMAI_BARRIER_TAIL_ACTIVE_SRC_THRESHOLD=1`
+- `SIMAI_BARRIER_TAIL_MIN_BYTES_LEFT=0`
+- `SIMAI_BARRIER_TAIL_RETAIN_INFLIGHT_BYTES=65536`
+- `SIMAI_BARRIER_TAIL_DIAG` unset (quiet mode)
+- timeout: 180s per branch
+
+### 4-layer boundary (`dataAllReduce4WgBurst.tmp`)
+
+- r1 (`20260528-quiet-d4g1_th1min0_quiet-r1`): `delta=-192`
+- r2 (`20260528-quiet-d4g1_th1min0_quiet-r2`): `delta=0`
+- r3 (`20260528-quiet-d4g1_th1min0_quiet-r3`): `delta=+576`
+- mean: `+128`
+
+### 8-layer boundary (`dataAllReduce8WgBurst`)
+
+- r1 (`20260528-quiet-d8g1_th1min0_quiet-r1`): `delta=-576`
+- r2 (`20260528-quiet-d8g1_th1min0_quiet-r2`): `delta=+192`
+- r3 (`20260528-quiet-d8g1_th1min0_quiet-r3`): `delta=+768`
+- mean: `+128`
+
+### Takeaway
+
+- In quiet mode, sign is no longer stably negative; it flips across repeats.
+- This is consistent with prior finding that heavy diagnostics caused major wall-clock bias.
+- Residual variance remains high under timeout truncation; mechanism effect in this window looks near-zero to mildly positive on average.
+
+### Next queued action
+
+- Add a first-class quiet/verbose toggle in the standard runner and use quiet mode for primary benefit comparisons.
+- Move final judgment to completion-aligned or longer-horizon metrics to reduce timeout-noise sign flips.

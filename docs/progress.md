@@ -7378,3 +7378,52 @@ Enabling Shared Folders with Fusion on a Apple host
 
 - Add a lightweight runner mode to disable barrier-tail verbose logs during paired benchmarks.
 - Then rerun boundary workloads (`4-layer` negative, `8-layer` neutral) with N>=3 under diag-off to separate true mechanism effect from log artifact.
+
+## Run Update: 2026-05-28 01:05 CST (quiet-mode N=3 stability check)
+
+- Completed the queued N>=3 repeats under **quiet benchmark mode** (no `SIMAI_BARRIER_TAIL_DIAG`) to remove verbose logging bias from wall-clock capped comparisons.
+- Common setup:
+  - `ACTIVE_SRC_THRESHOLD=1`, `MIN_BYTES_LEFT=0`, `RETAIN_INFLIGHT_BYTES=65536`
+  - timeout: cap-only/cap-plus-prio both `180s`
+  - topology/config unchanged (`8g` + `SimAI.vm.conf`)
+
+### Workloads and run dirs
+
+- `4-layer` boundary (`./example/dataAllReduce4WgBurst.tmp.txt`):
+  - `20260528-quiet-d4g1_th1min0_quiet-r1`
+  - `20260528-quiet-d4g1_th1min0_quiet-r2`
+  - `20260528-quiet-d4g1_th1min0_quiet-r3`
+- `8-layer` boundary (`./example/dataAllReduce8WgBurst.txt`):
+  - `20260528-quiet-d8g1_th1min0_quiet-r1`
+  - `20260528-quiet-d8g1_th1min0_quiet-r2`
+  - `20260528-quiet-d8g1_th1min0_quiet-r3`
+
+### Results (`delta = sendflow_lines(cap_plus) - sendflow_lines(cap_only)`)
+
+- `4-layer`:
+  - r1: `5568 - 5760 = -192`
+  - r2: `5760 - 5760 = 0`
+  - r3: `5568 - 4992 = +576`
+  - mean delta: `+128`
+
+- `8-layer`:
+  - r1: `5184 - 5760 = -576`
+  - r2: `5760 - 5568 = +192`
+  - r3: `5952 - 5184 = +768`
+  - mean delta: `+128`
+
+### What changed vs earlier "strong negative" trend
+
+- Sign is now **unstable** (negative/zero/positive all appear) instead of consistently negative.
+- This supports prior diagnosis that a major part of earlier negative trend came from asymmetric diagnostics overhead under fixed wall-clock timeout.
+- Quiet mode still has small asymmetry (`cap-plus` stdout ~`135–156KB` from prio-enable lines vs cap-only ~`2–3KB`), but it is orders of magnitude smaller than previous ~`400MB` diagnostic flood.
+
+### Current interpretation
+
+- After removing heavy diagnostic bias, mechanism effect in this envelope appears **near-zero to slightly positive on average**, with high run-to-run variance under timeout truncation.
+- Therefore, "always negative" is not supported under quiet-mode repeats.
+
+### Next queued action
+
+- Add runner-level quiet switch (toggle `SIMAI_BARRIER_TAIL_DIAG`) to standardize future paired benchmarks.
+- For final benefit claim, prefer completion-aligned endpoints (or longer horizon) to reduce timeout-noise-driven sign flips.
