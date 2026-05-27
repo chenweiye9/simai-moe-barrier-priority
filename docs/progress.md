@@ -6918,3 +6918,87 @@ Enabling Shared Folders with Fusion on a Apple host
 ### Next smallest action
 
 - Keep these new defaults and continue Phase-2 discriminator runs; next run should use a paired 120s envelope and compare triggered vs non-triggered windows using full `summary.txt` + `stdout.log` diffs.
+
+## Run Update: 2026-05-27 14:27 CST
+
+- Continued Phase-2 mainline autonomously with the hardened VM wrapper (`./scripts/vm-autonomous-step.sh`) and no pause between sub-experiments.
+- Goal of this batch: collapse the trigger/no-trigger ambiguity into a concrete timeout-window boundary under one fixed envelope.
+
+### Fixed envelope (held constant unless noted)
+
+- `SIMAI_WORKLOAD=./example/microMoE128ConcurrentUltraTiny.txt`
+- `SIMAI_TOPOLOGY=./Spectrum-X_1024g_8gps_400Gbps_H100`
+- `SIMAI_THREADS=1`
+- `SIMAI_BARRIER_TAIL_RETAIN_INFLIGHT_BYTES=65536`
+- `SIMAI_BARRIER_TAIL_QP_DIAG=1`
+- `SIMAI_BARRIER_TAIL_COMPLETION_DIAG=1`
+- `SIMAI_BARRIER_TAIL_COMPLETION_DIAG_LAYER=moe_block_01_dp_sync`
+- `SIMAI_BARRIER_TAIL_STREAM_DIAG=1`
+- `SIMAI_BARRIER_TAIL_STREAM_DIAG_LIMIT=256`
+- `SIMAI_BARRIER_TAIL_STREAM_DIAG_EVERY=1`
+- `SIMAI_WORKLOAD_STATE_TRACE_EVERY=1`
+- `SIMAI_SKIP_BUILD=1`
+- `SIMAI_VM_SSH_TRIES=1`
+- `SIMAI_VM_ENABLE_VMRUN_RECOVERY=0`
+
+### Concrete VM-side runs executed
+
+1. Baseline 120s repeat (`active_src_threshold=8`):
+   - `/home/weiye/simai-moe-barrier-priority-main/results/barrier-tail-retain-20260527-052659`
+   - outcome: `cap_plus_prio trigger_events=0`, `barrier_tail_prio_enable=0`.
+
+2. 120s repeat #2 (`active_src_threshold=8`):
+   - `/home/weiye/simai-moe-barrier-priority-main/results/barrier-tail-retain-20260527-053451`
+   - outcome: again `trigger_events=0`, `barrier_tail_prio_enable=0`.
+
+3. Single-variable check (`active_src_threshold=1`, still 120s):
+   - `/home/weiye/simai-moe-barrier-priority-main/results/barrier-tail-retain-20260527-054103`
+   - outcome: still `trigger_events=0`, `barrier_tail_prio_enable=0`.
+   - implication: threshold value is not the primary reason for zero-trigger at 120s.
+
+4. Timeout extension to 240s (`active_src_threshold=8`):
+   - `/home/weiye/simai-moe-barrier-priority-main/results/barrier-tail-retain-20260527-054652`
+   - outcome: trigger restored strongly (`trigger_events=4096`, `barrier_tail_prio_enable=4096`).
+
+5. Timeout 180s (`active_src_threshold=8`):
+   - `/home/weiye/simai-moe-barrier-priority-main/results/barrier-tail-retain-20260527-055220`
+   - outcome: trigger restored (`trigger_events=4096`).
+
+6. Timeout 150s (`active_src_threshold=8`):
+   - `/home/weiye/simai-moe-barrier-priority-main/results/barrier-tail-retain-20260527-055749`
+   - outcome: trigger restored (`trigger_events=4096`).
+
+7. Timeout 130s (`active_src_threshold=8`):
+   - `/home/weiye/simai-moe-barrier-priority-main/results/barrier-tail-retain-20260527-060322`
+   - outcome: trigger restored (`trigger_events=4096`).
+
+8. Timeout 125s (`active_src_threshold=8`):
+   - `/home/weiye/simai-moe-barrier-priority-main/results/barrier-tail-retain-20260527-060902`
+   - outcome: trigger restored (`trigger_events=4096`, disable slightly lagged due to timeout boundary: `barrier_tail_prio_disable=3968`).
+
+9. Timeout 122s (`active_src_threshold=8`):
+   - `/home/weiye/simai-moe-barrier-priority-main/results/barrier-tail-retain-20260527-061648`
+   - outcome: trigger restored (`trigger_events=4094`).
+
+10. Timeout 121s (`active_src_threshold=8`):
+    - `/home/weiye/simai-moe-barrier-priority-main/results/barrier-tail-retain-20260527-062229`
+    - outcome: trigger partially restored (`trigger_events=3072`, `barrier_tail_prio_enable=3072`).
+
+### Additional blocker-cost evidence during this batch
+
+- Disk guard auto-pruned old results twice and prevented mid-run disk-full failures:
+  - one run pruned `7` directories before launch (`disk_guard_before_free_gb=10 -> after=17`).
+  - another run pruned `3` directories (`11 -> 13`).
+- No connectivity churn loop observed (single-probe mode with `SSH_TRIES=1` stayed stable).
+
+### Narrowed conclusion (new)
+
+- Trigger presence in this envelope is strongly time-window gated:
+  - `120s` -> no trigger.
+  - `121s` and above (tested: `121/122/125/130/150/180/240`) -> trigger appears.
+- This collapses the previous “random intermittency” interpretation into a much sharper boundary condition tied to simulation horizon length.
+- Causal caveat remains unchanged: even when trigger appears massively, local competition and switch enqueue indicators remain absent (`local_competing_sendable max=0`, `switch_enqueue_events=0`), so observed mechanism activity still does not map to demonstrated queue-level benefit.
+
+### Next smallest discriminating action
+
+- Keep all knobs fixed and run one paired 121s vs 120s artifact diff focused on first occurrence timestamps of `simai-barrier-tail enable` and corresponding `simai-workload-state` counters to explain why the boundary crosses exactly at +1s horizon.

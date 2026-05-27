@@ -5879,3 +5879,37 @@ Enabling Shared Folders with Fusion on a Apple host
 ### Next action queued
 
 - Continue Phase-2 paired 120s discriminator runs under this hardened wrapper; keep collecting triggered-vs-nontriggered full artifact diffs.
+
+## 2026-05-27 14:27 CST
+
+- Continued mainline without pause using VM-only authoritative wrapper and hardened anti-blocker path.
+- Batch intent: replace trigger intermittency narrative with a strict timeout-boundary classification.
+
+### Runs and key outcomes
+
+- `120s` (run dirs `20260527-052659`, `20260527-053451`): `cap_plus_prio trigger_events=0`.
+- `120s` + `active_src_threshold=1` (run dir `20260527-054103`): still `trigger_events=0`.
+- `240s` (run dir `20260527-054652`): `trigger_events=4096`.
+- `180s` (`20260527-055220`): `trigger_events=4096`.
+- `150s` (`20260527-055749`): `trigger_events=4096`.
+- `130s` (`20260527-060322`): `trigger_events=4096`.
+- `125s` (`20260527-060902`): `trigger_events=4096`.
+- `122s` (`20260527-061648`): `trigger_events=4094`.
+- `121s` (`20260527-062229`): `trigger_events=3072`.
+
+### New narrowed state
+
+- Trigger boundary is now sharply constrained:
+  - `120s` => no trigger.
+  - `>=121s` => trigger present (partial at 121s, near/full by 122-125s).
+- `active_src_threshold` is not the dominant cause of zero-trigger at 120s (8->1 did not restore trigger at 120s).
+- Even with restored trigger, queue-competition signatures remain absent (`local_competing_sendable max=0`, `switch_enqueue_events=0`), so benefit mechanism is still unproven.
+
+### Blocker-cost behavior observed
+
+- Disk guard auto-pruned before launch when free space dropped below threshold (`10GB->17GB`, `11GB->13GB`), preventing `Errno 28` mid-run failures.
+- Single-probe connectivity strategy remained stable; no retry storms.
+
+### Immediate next action queued
+
+- Perform paired `120s` vs `121s` deep artifact diff (first tail-enable timestamp vs workload-state progression) to explain why +1s horizon crosses the trigger boundary.
