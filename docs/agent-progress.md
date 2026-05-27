@@ -6107,3 +6107,50 @@ Observation:
   - `ACTIVE_SRC_THRESHOLD=1`
   - `MIN_BYTES_LEFT=0`
 - If repeated runs fail to keep positive trend, stop widening matrix and pivot to deeper fairness/tail-churn instrumentation.
+
+## 2026-05-27 23:35 CST
+
+- Completed a traffic-shape classification matrix to identify where barrier-tail priority yields gain vs regression.
+
+### Experiment envelope
+
+- topology/config: `./Spectrum-X_8g_8gps_400Gbps_H100` + `astra-sim-alibabacloud/inputs/config/SimAI.vm.conf`
+- timeout: cap-only/cap-plus-prio both `180s`
+- fixed knobs: `SIMAI_BARRIER_TAIL_RETAIN_INFLIGHT_BYTES=65536`, `SIMAI_BARRIER_TAIL_REQUIRE_COMPLETED_SOURCE=0`, `SIMAI_NUM_PASSES=8`
+- metric: `sendflow_lines` delta within same timeout window
+
+### Burst-layer sweep (`1GiB` per layer)
+
+1. `ACTIVE_SRC_THRESHOLD=1`, `MIN_BYTES_LEFT=0`
+- `2` layers (`20260527-traffic-dataAllReduce2WgBurst.tmp-th1min0`): `delta=-576`
+- `4` layers (`20260527-traffic-dataAllReduce4WgBurst.tmp-th1min0`): `delta=-384`
+- `8` layers (`20260527-traffic-dataAllReduce8WgBurst-th1min0`): `delta=0`
+
+2. `ACTIVE_SRC_THRESHOLD=8`, `MIN_BYTES_LEFT=1MiB`
+- `2` layers (`20260527-traffic-dataAllReduce2WgBurst.tmp-th8min1m`): `delta=-576`
+- `4` layers (`20260527-traffic-dataAllReduce4WgBurst.tmp-th8min1m`): `delta=-384`
+- `8` layers (`20260527-traffic-dataAllReduce8WgBurst-th8min1m`): `delta=-768`
+
+### Additional shape probes (`th=1`, `min=0`)
+
+- `8` layers × `256MiB` (`20260527-traffic-dataAllReduce8WgBurst256M.tmp-th1min0`): `delta=-1344`
+- `16` layers × `1GiB` (`20260527-traffic-dataAllReduce16WgBurst.tmp-th1min0`): `delta=-384`
+
+### Stable observations
+
+- cap-plus-prio consistently triggers and sees local contention (`local_competing_sendable max=7`).
+- cap-only has no trigger.
+- `pass:0 finished` is equal across branches for each matched workload.
+
+### Classification outcome
+
+- High-gain traffic class: not found yet in this matrix.
+- Neutral boundary: `8` layers × `1GiB` with permissive gate (`th=1,min=0`) reached `delta=0`.
+- Negative class: most other tested burst shapes, especially with stricter gate (`th=8,min=1MiB`) or smaller message size (`256MiB`).
+
+### Next queued action
+
+- Repeatability check (N>=3) on:
+  - neutral boundary (`8` layers, `1GiB`, `th=1,min=0`)
+  - negative boundary (`4` layers, `1GiB`, `th=1,min=0`)
+- If signs hold, proceed to fairness/rotation instrumentation to explain non-conversion from trigger/competition to throughput gain.

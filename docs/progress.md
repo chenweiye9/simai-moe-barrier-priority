@@ -7277,3 +7277,59 @@ Enabling Shared Folders with Fusion on a Apple host
 - Promote one candidate point for repeatability validation (N>=3) before code changes:
   - primary candidate: `ACTIVE_SRC_THRESHOLD=1`, `MIN_BYTES_LEFT=0` (first observed positive delta).
 - If positive trend does not hold under repeats, freeze mechanism knobs and move to instrumentation-level root cause on local-select fairness/tail churn rather than expanding workload matrix further.
+
+## Run Update: 2026-05-27 23:35 CST (traffic-shape map for gain vs regression)
+
+- Executed a focused traffic-shape matrix to classify where barrier-tail priority helps or hurts.
+- Common setup:
+  - topology/config: `./Spectrum-X_8g_8gps_400Gbps_H100` + `astra-sim-alibabacloud/inputs/config/SimAI.vm.conf`
+  - timeout: cap-only/cap-plus-prio both `180s`
+  - fixed: `SIMAI_BARRIER_TAIL_RETAIN_INFLIGHT_BYTES=65536`, `SIMAI_BARRIER_TAIL_REQUIRE_COMPLETED_SOURCE=0`, `SIMAI_NUM_PASSES=8`
+  - compared metric: `sendflow_lines` delta (`cap_plus_prio - cap_only`) within same timeout window
+
+### Matrix A: burst allreduce layer count (1GiB each)
+
+1. `th=1`, `min=0` (candidate positive gate)
+- `2` layers (`20260527-traffic-dataAllReduce2WgBurst.tmp-th1min0`): `4992 - 5568 = -576`
+- `4` layers (`20260527-traffic-dataAllReduce4WgBurst.tmp-th1min0`): `4992 - 5376 = -384`
+- `8` layers (`20260527-traffic-dataAllReduce8WgBurst-th1min0`): `5184 - 5184 = 0`
+
+2. `th=8`, `min=1MiB` (historical default-like gate)
+- `2` layers (`20260527-traffic-dataAllReduce2WgBurst.tmp-th8min1m`): `5184 - 5760 = -576`
+- `4` layers (`20260527-traffic-dataAllReduce4WgBurst.tmp-th8min1m`): `4992 - 5376 = -384`
+- `8` layers (`20260527-traffic-dataAllReduce8WgBurst-th8min1m`): `4800 - 5568 = -768`
+
+### Matrix B: size/concurrency variants under `th=1`, `min=0`
+
+- `8` layers × `256MiB` (`20260527-traffic-dataAllReduce8WgBurst256M.tmp-th1min0`): `20544 - 21888 = -1344`
+- `16` layers × `1GiB` (`20260527-traffic-dataAllReduce16WgBurst.tmp-th1min0`): `5184 - 5568 = -384`
+
+### Stable diagnostics across these runs
+
+- cap-only always: `trigger_events=0`, no local-select competition diagnostics.
+- cap-plus-prio always (except deliberately disabled gate case from earlier sweep):
+  - nonzero trigger events
+  - `local_competing_sendable max=7` with millions of local-select events.
+- `pass:0 finished` timestamps remain equal between branches for the same workload in these runs.
+
+### Classification summary (current evidence)
+
+- High-gain traffic class: **not observed yet** in this matrix.
+- Neutral class (near zero):
+  - heavier burst fan-out with permissive gate (`8` layers, `th=1`, `min=0`) gave `delta=0`.
+- Negative-gain class (most common):
+  - low-to-medium burst concurrency (`2`/`4` layers) under both gates.
+  - tighter default-like gate (`th=8`, `min=1MiB`) worsens negative tail delta.
+  - smaller message size at same layer count (`8×256MiB`) also remains negative.
+
+### Interpretation
+
+- Trigger correctness is robust, but benefit is highly sensitive and currently non-positive for most tested burst shapes.
+- Looser gate (`th=1`, `min=0`) can reduce harm and occasionally reach neutral/positive in earlier single-point runs, but positive effect is not yet stable across nearby traffic shapes.
+
+### Next queued action
+
+- Run N>=3 repeats on two boundary points to separate noise from true traffic effect:
+  - neutral boundary: `8` layers × `1GiB`, `th=1`, `min=0`
+  - negative boundary: `4` layers × `1GiB`, `th=1`, `min=0`
+- If sign remains stable after repeats, move to instrumentation around local-select fairness/rotation impact to explain why contention trigger does not convert into throughput gain.
