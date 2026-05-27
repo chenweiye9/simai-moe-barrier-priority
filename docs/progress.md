@@ -6850,3 +6850,71 @@ Enabling Shared Folders with Fusion on a Apple host
 
 - Keep VM reachability and disk headroom as a maintained precondition.
 - On the next cycle, run one paired 120s MoE discriminator with **identical knobs but fixed stream diag limit** (e.g., 256) and archive both `summary.txt` + `stdout.log` from both caps for direct side-by-side diff against `20260527-034415` and `20260527-043947` to isolate why trigger appears intermittently.
+
+## Blocker Cost Reduction: 2026-05-27 13:22 CST
+
+- Objective for this cycle: reduce pure blocker overhead (SSH failure churn, ineffective vmrun retries, late disk-full failures) without changing mechanism logic.
+
+### Implementation landed
+
+- Edited authoritative wrapper: `/Users/weiye/Documents/moe/scripts/vm-autonomous-step.sh`.
+- Added connectivity backoff state machine (state file: `/Users/weiye/Documents/moe/docs/.vm-connectivity.state`):
+  - tracks `connect_fail_streak` and `connect_last_fail_epoch`.
+  - when failures are recent and exceed threshold, wrapper enters cooldown mode: single SSH probe only, vmrun recovery disabled for that cycle.
+  - cooldown is exponential with cap via env knobs:
+    - `SIMAI_VM_CONNECT_COOLDOWN_BASE_SEC` (default 120)
+    - `SIMAI_VM_CONNECT_COOLDOWN_MAX_SEC` (default 1800)
+    - `SIMAI_VM_CONNECT_COOLDOWN_START_STREAK` (default 3)
+    - `SIMAI_VM_CONNECT_RESET_SEC` (default 21600)
+- Added vmrun recovery feature gate:
+  - `SIMAI_VM_ENABLE_VMRUN_RECOVERY` (default `0`) so we no longer pay repeated vmrun cost by default when vmrun is known unreliable.
+- Added VM-side disk preflight guard before run launch:
+  - `SIMAI_VM_DISK_GUARD_ENABLE` (default `1`)
+  - `SIMAI_VM_DISK_MIN_FREE_GB` (default `12`)
+  - `SIMAI_VM_DISK_PRUNE_KEEP` (default `8`)
+  - if free space below threshold, auto-prune older `results/barrier-tail-retain-*`; if still below threshold, fail fast with `disk_guard_blocked=1` and rc `75` (non-connectivity failure, no retry churn).
+
+### Validation evidence (all run this cycle)
+
+1. Syntax check:
+   - `bash -n /Users/weiye/Documents/moe/scripts/vm-autonomous-step.sh`
+   - result: pass.
+
+2. Normal VM run with new guards (no forced failures):
+   - command: `SIMAI_VM_SSH_TRIES=1 SIMAI_VM_ENABLE_VMRUN_RECOVERY=0 SIMAI_SKIP_BUILD=1 SIMAI_CASE_TIMEOUT_SEC=8 SIMAI_WORKLOAD=./example/microAllReduce8Stable.txt ... ./scripts/vm-autonomous-step.sh`
+   - result: SSH and remote run succeed; guard prints `disk_guard_before_free_gb=18` and `disk_guard_after_free_gb=18`; wrapper returns success.
+
+3. Cooldown behavior injection test (isolated temp state):
+   - forced host `127.0.0.1:22` refusal with:
+     - `SIMAI_VM_CONNECT_STATE_FILE=/tmp/vm-cooldown-test.state`
+     - `SIMAI_VM_CONNECT_COOLDOWN_START_STREAK=1`
+     - `SIMAI_VM_CONNECT_COOLDOWN_BASE_SEC=600`
+   - first failed run: 3 SSH attempts + vmrun attempts, then recorded `connect_fail_streak=1`.
+   - second immediate run: wrapper printed
+     - `cooldown active ... forcing single probe and skipping vmrun recovery`
+     - then only `ssh attempt 1/1`.
+   - outcome: confirms retry-churn suppression works.
+
+4. Disk guard fail-fast injection test:
+   - forced threshold with `SIMAI_VM_DISK_MIN_FREE_GB=1000`.
+   - output showed:
+     - `disk_guard_before_free_gb=18`
+     - `disk_guard_pruned_dirs=3`
+     - `disk_guard_after_free_gb=22`
+     - `disk_guard_blocked=1` + `disk_guard_reason=insufficient_free_space`
+   - wrapper exited with `rc=75` and stopped retries immediately.
+
+5. Post-injection health check under defaults:
+   - `SIMAI_VM_SSH_TRIES=1 SIMAI_VM_ENABLE_VMRUN_RECOVERY=0 ... SIMAI_CASE_TIMEOUT_SEC=6 ...`
+   - result: successful VM execution, disk guard stable at 22GB free.
+
+### Net effect on pure blocker cost
+
+- Removes most repeated empty retries during known outage windows.
+- Avoids repeated vmrun recovery calls unless explicitly enabled.
+- Converts mid-run disk-full crashes into pre-run deterministic checks with bounded cleanup.
+- Preserves mechanism-experiment path; no SimAI mechanism semantics changed in this patch.
+
+### Next smallest action
+
+- Keep these new defaults and continue Phase-2 discriminator runs; next run should use a paired 120s envelope and compare triggered vs non-triggered windows using full `summary.txt` + `stdout.log` diffs.

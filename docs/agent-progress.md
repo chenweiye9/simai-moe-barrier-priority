@@ -5841,3 +5841,41 @@ Enabling Shared Folders with Fusion on a Apple host
 ### Next action queued
 
 - Next cycle: run one paired 120s `microMoE128ConcurrentUltraTiny` discriminator with fixed diag envelope and capture complete per-cap `summary.txt` + `stdout.log` for direct diff against `20260527-034415` (triggered) and `20260527-043947` (not triggered) to isolate trigger intermittency conditions.
+
+## 2026-05-27 13:22 CST
+
+- User intent handled: reduce pure blocker costs (infra churn) directly in authoritative automation path.
+- File changed: `/Users/weiye/Documents/moe/scripts/vm-autonomous-step.sh`.
+
+### What changed
+
+- Connectivity backoff state added with persistent file (`docs/.vm-connectivity.state`):
+  - records consecutive connectivity failures and last fail epoch.
+  - enters cooldown single-probe mode during recent repeated failures.
+- vmrun retries now controlled by env gate:
+  - `SIMAI_VM_ENABLE_VMRUN_RECOVERY` default set to `0`.
+- Remote disk guard added before launching diagnostics:
+  - pre-check free GB on VM workdir filesystem.
+  - auto-prune old `results/barrier-tail-retain-*` beyond keep count.
+  - fail fast with rc=75 if still below threshold.
+
+### Validation sequence executed
+
+1. `bash -n scripts/vm-autonomous-step.sh` passed.
+2. Real VM run (8s timeout, skip build) succeeded and printed disk guard telemetry (`18GB` free).
+3. Cooldown injection with localhost refusal + temp state file:
+   - first run: 3 attempts and failure streak recorded.
+   - second run: cooldown message emitted; only one probe executed; vmrun skipped.
+4. Disk guard injection with `SIMAI_VM_DISK_MIN_FREE_GB=1000`:
+   - guard pruned 3 old result dirs, then blocked run (`disk_guard_blocked=1`), rc=75 surfaced as non-connectivity failure.
+5. Default-parameter health run after injection succeeded (disk guard at `22GB` free).
+
+### Why this addresses blocker cost
+
+- Outage periods no longer incur repetitive multi-attempt + vmrun loops every cycle.
+- Disk-pressure failures are caught before launching long experiments.
+- Failing states become explicit and actionable through deterministic wrapper markers.
+
+### Next action queued
+
+- Continue Phase-2 paired 120s discriminator runs under this hardened wrapper; keep collecting triggered-vs-nontriggered full artifact diffs.

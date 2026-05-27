@@ -14,6 +14,15 @@ SSH_CONNECT_TIMEOUT="${SIMAI_VM_SSH_TIMEOUT_SEC:-8}"
 SSH_TRIES="${SIMAI_VM_SSH_TRIES:-3}"
 SSH_RETRY_SLEEP_SEC="${SIMAI_VM_SSH_RETRY_SLEEP_SEC:-5}"
 VM_SESSION_TIMEOUT_SEC="${SIMAI_VM_SESSION_TIMEOUT_SEC:-1800}"
+VM_ENABLE_VMRUN_RECOVERY="${SIMAI_VM_ENABLE_VMRUN_RECOVERY:-0}"
+VM_CONNECT_STATE_FILE="${SIMAI_VM_CONNECT_STATE_FILE:-${ROOT_DIR}/docs/.vm-connectivity.state}"
+VM_CONNECT_COOLDOWN_BASE_SEC="${SIMAI_VM_CONNECT_COOLDOWN_BASE_SEC:-120}"
+VM_CONNECT_COOLDOWN_MAX_SEC="${SIMAI_VM_CONNECT_COOLDOWN_MAX_SEC:-1800}"
+VM_CONNECT_COOLDOWN_START_STREAK="${SIMAI_VM_CONNECT_COOLDOWN_START_STREAK:-3}"
+VM_CONNECT_RESET_SEC="${SIMAI_VM_CONNECT_RESET_SEC:-21600}"
+VM_DISK_GUARD_ENABLE="${SIMAI_VM_DISK_GUARD_ENABLE:-1}"
+VM_DISK_MIN_FREE_GB="${SIMAI_VM_DISK_MIN_FREE_GB:-12}"
+VM_DISK_PRUNE_KEEP="${SIMAI_VM_DISK_PRUNE_KEEP:-8}"
 
 RET_BYTES="${SIMAI_BARRIER_TAIL_RETAIN_INFLIGHT_BYTES:-65536}"
 RET_ACTIVE_THRESHOLD="${SIMAI_BARRIER_TAIL_ACTIVE_SRC_THRESHOLD:-8}"
@@ -45,11 +54,113 @@ RET_QP_DIAG="${SIMAI_BARRIER_TAIL_QP_DIAG:-}"
 RET_SKIP_BUILD="${SIMAI_SKIP_BUILD:-0}"
 
 LOG_PREFIX="[vm-autonomous-step]"
+CONNECT_FAIL_STREAK=0
+CONNECT_LAST_FAIL_EPOCH=0
 
 if [[ -z "${VM_PASS}" ]]; then
   echo "${LOG_PREFIX} missing VM password (SIMAI_VM_PASS)" >&2
   exit 2
 fi
+
+load_connect_state() {
+  CONNECT_FAIL_STREAK=0
+  CONNECT_LAST_FAIL_EPOCH=0
+  if [[ ! -f "${VM_CONNECT_STATE_FILE}" ]]; then
+    return 0
+  fi
+  local value
+  value="$(rg -n '^connect_fail_streak=' "${VM_CONNECT_STATE_FILE}" | tail -n 1 | cut -d'=' -f2 || true)"
+  if [[ -n "${value}" && "${value}" =~ ^[0-9]+$ ]]; then
+    CONNECT_FAIL_STREAK="${value}"
+  fi
+  value="$(rg -n '^connect_last_fail_epoch=' "${VM_CONNECT_STATE_FILE}" | tail -n 1 | cut -d'=' -f2 || true)"
+  if [[ -n "${value}" && "${value}" =~ ^[0-9]+$ ]]; then
+    CONNECT_LAST_FAIL_EPOCH="${value}"
+  fi
+}
+
+save_connect_state() {
+  local now_human
+  now_human="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  {
+    echo "connect_fail_streak=${CONNECT_FAIL_STREAK}"
+    echo "connect_last_fail_epoch=${CONNECT_LAST_FAIL_EPOCH}"
+    echo "updated_human=${now_human}"
+  } > "${VM_CONNECT_STATE_FILE}"
+}
+
+reset_connect_state() {
+  CONNECT_FAIL_STREAK=0
+  CONNECT_LAST_FAIL_EPOCH=0
+  save_connect_state
+}
+
+record_connectivity_failure() {
+  local now_epoch
+  now_epoch="$(date +%s)"
+  if (( CONNECT_LAST_FAIL_EPOCH == 0 || now_epoch - CONNECT_LAST_FAIL_EPOCH > VM_CONNECT_RESET_SEC )); then
+    CONNECT_FAIL_STREAK=1
+  else
+    CONNECT_FAIL_STREAK=$((CONNECT_FAIL_STREAK + 1))
+  fi
+  CONNECT_LAST_FAIL_EPOCH="${now_epoch}"
+  save_connect_state
+  echo "${LOG_PREFIX} recorded connectivity failure streak=${CONNECT_FAIL_STREAK}"
+}
+
+compute_connect_cooldown_sec() {
+  local streak="$1"
+  local cooldown="${VM_CONNECT_COOLDOWN_BASE_SEC}"
+  local exponent=0
+  local idx
+
+  if (( streak < VM_CONNECT_COOLDOWN_START_STREAK )); then
+    echo 0
+    return 0
+  fi
+
+  exponent=$((streak - VM_CONNECT_COOLDOWN_START_STREAK))
+  for ((idx = 0; idx < exponent; idx++)); do
+    cooldown=$((cooldown * 2))
+    if (( cooldown >= VM_CONNECT_COOLDOWN_MAX_SEC )); then
+      cooldown="${VM_CONNECT_COOLDOWN_MAX_SEC}"
+      break
+    fi
+  done
+
+  if (( cooldown > VM_CONNECT_COOLDOWN_MAX_SEC )); then
+    cooldown="${VM_CONNECT_COOLDOWN_MAX_SEC}"
+  fi
+  echo "${cooldown}"
+}
+
+cooldown_single_probe_mode() {
+  local now_epoch
+  now_epoch="$(date +%s)"
+
+  if (( CONNECT_FAIL_STREAK < VM_CONNECT_COOLDOWN_START_STREAK )); then
+    return 1
+  fi
+  if (( CONNECT_LAST_FAIL_EPOCH == 0 )); then
+    return 1
+  fi
+  if (( now_epoch - CONNECT_LAST_FAIL_EPOCH > VM_CONNECT_RESET_SEC )); then
+    return 1
+  fi
+
+  local cooldown_sec elapsed
+  cooldown_sec="$(compute_connect_cooldown_sec "${CONNECT_FAIL_STREAK}")"
+  if (( cooldown_sec <= 0 )); then
+    return 1
+  fi
+  elapsed=$((now_epoch - CONNECT_LAST_FAIL_EPOCH))
+  if (( elapsed >= cooldown_sec )); then
+    return 1
+  fi
+
+  echo "${LOG_PREFIX} cooldown active (streak=${CONNECT_FAIL_STREAK} elapsed=${elapsed}s cooldown=${cooldown_sec}s); forcing single probe and skipping vmrun recovery"
+  return 0
+}
 
 run_ssh_expect() {
   local remote_cmd="$1"
@@ -165,6 +276,38 @@ ${remote_env}
 run_stamp=\$(date +%Y%m%d-%H%M%S)
 run_log="/tmp/vm-autonomous-step-\${run_stamp}.log"
 echo "run_log=\${run_log}"
+
+if [[ "${VM_DISK_GUARD_ENABLE}" == "1" ]]; then
+  disk_before_kb=\$(df -Pk "${VM_WORKDIR}" | awk 'NR==2 {print \$4}')
+  disk_before_gb=\$((disk_before_kb / 1024 / 1024))
+  echo "disk_guard_before_free_gb=\${disk_before_gb}"
+  echo "disk_guard_min_free_gb=${VM_DISK_MIN_FREE_GB}"
+  echo "disk_guard_prune_keep=${VM_DISK_PRUNE_KEEP}"
+  if (( disk_before_gb < ${VM_DISK_MIN_FREE_GB} )); then
+    results_dir="${VM_WORKDIR}/results"
+    pruned_dirs=0
+    if compgen -G "\${results_dir}/barrier-tail-retain-*" >/dev/null; then
+      mapfile -t retain_dirs < <(ls -1dt "\${results_dir}"/barrier-tail-retain-* 2>/dev/null || true)
+      total_dirs=\${#retain_dirs[@]}
+      if (( total_dirs > ${VM_DISK_PRUNE_KEEP} )); then
+        for ((idx = ${VM_DISK_PRUNE_KEEP}; idx < total_dirs; idx++)); do
+          rm -rf "\${retain_dirs[\${idx}]}" || true
+          pruned_dirs=\$((pruned_dirs + 1))
+        done
+      fi
+    fi
+    echo "disk_guard_pruned_dirs=\${pruned_dirs}"
+  fi
+  disk_after_kb=\$(df -Pk "${VM_WORKDIR}" | awk 'NR==2 {print \$4}')
+  disk_after_gb=\$((disk_after_kb / 1024 / 1024))
+  echo "disk_guard_after_free_gb=\${disk_after_gb}"
+  if (( disk_after_gb < ${VM_DISK_MIN_FREE_GB} )); then
+    echo "disk_guard_blocked=1"
+    echo "disk_guard_reason=insufficient_free_space"
+    exit 75
+  fi
+fi
+
 (
   SIMAI_BARRIER_TAIL_RETAIN_INFLIGHT_BYTES=${RET_BYTES} \
   SIMAI_BARRIER_TAIL_ACTIVE_SRC_THRESHOLD=${RET_ACTIVE_THRESHOLD} \
@@ -204,12 +347,24 @@ EOF
 }
 
 main() {
+  load_connect_state
+
+  local effective_ssh_tries
+  effective_ssh_tries="${SSH_TRIES}"
+  local allow_vmrun_recovery
+  allow_vmrun_recovery="${VM_ENABLE_VMRUN_RECOVERY}"
+  if cooldown_single_probe_mode; then
+    effective_ssh_tries=1
+    allow_vmrun_recovery=0
+  fi
+
   local remote_cmd
   remote_cmd="$(build_remote_cmd)"
 
   local i
-  for ((i = 1; i <= SSH_TRIES; i++)); do
-    echo "${LOG_PREFIX} ssh attempt ${i}/${SSH_TRIES} to ${VM_USER}@${VM_HOST}"
+  local last_connectivity_rc=0
+  for ((i = 1; i <= effective_ssh_tries; i++)); do
+    echo "${LOG_PREFIX} ssh attempt ${i}/${effective_ssh_tries} to ${VM_USER}@${VM_HOST}"
     local ssh_rc=0
     if run_ssh_expect "${remote_cmd}"; then
       ssh_rc=0
@@ -217,6 +372,7 @@ main() {
       ssh_rc=$?
     fi
     if (( ssh_rc == 0 )); then
+      reset_connect_state
       echo "${LOG_PREFIX} vm step succeeded"
       return 0
     fi
@@ -229,13 +385,21 @@ main() {
       echo "${LOG_PREFIX} remote command returned non-connectivity rc=${ssh_rc}; stop retrying"
       return "${ssh_rc}"
     fi
+    last_connectivity_rc="${ssh_rc}"
 
-    if (( i < SSH_TRIES )); then
-      try_vmrun_start || true
+    if (( i < effective_ssh_tries )); then
+      if [[ "${allow_vmrun_recovery}" == "1" ]]; then
+        try_vmrun_start || true
+      else
+        echo "${LOG_PREFIX} vmrun recovery disabled (SIMAI_VM_ENABLE_VMRUN_RECOVERY=${allow_vmrun_recovery})"
+      fi
       sleep "${SSH_RETRY_SLEEP_SEC}"
     fi
   done
 
+  if (( last_connectivity_rc == 255 || last_connectivity_rc == 124 )); then
+    record_connectivity_failure
+  fi
   echo "${LOG_PREFIX} all ssh attempts failed" >&2
   return 1
 }
